@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="description" content="XAUUSD Trading Signal Dashboard">
+  <meta name="theme-color" content="#0d1117">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>XAUUSD Signals</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ══════════ TOP BAR ══════════ -->
+  <header class="topbar">
+    <div class="topbar__left">
+      <div class="topbar__logo">Au</div>
+      <span class="topbar__asset">XAU/USD</span>
+    </div>
+    <div class="topbar__center">
+      <div class="topbar__price" id="header-price">$—</div>
+      <div class="topbar__change" id="header-change">—</div>
+    </div>
+    <div class="topbar__right">
+      <span class="session-pill" id="session-pill">⏳ —</span>
+      <div class="status-indicator" id="connection-status">
+        <span class="status-dot offline"></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ══════════ PAGES ══════════ -->
+  <div class="pages">
+
+    <!-- ═══ PAGE: SIGNAL ═══ -->
+    <div class="page active" id="page-signal">
+
+      <div class="news-banner" id="news-banner">
+        <span>⚠️</span>
+        <span class="news-banner__text"></span>
+        <span class="news-banner__time"></span>
+      </div>
+
+      <!-- Signal Hero -->
+      <div class="card fade-up">
+        <div class="signal-hero" id="signal-hero">
+          <div class="signal-hero__badge waiting">📡 Waiting for signal...</div>
+        </div>
+      </div>
+
+      <!-- TP / SL Levels -->
+      <div class="card fade-up fade-up-d1">
+        <div class="card__header"><span class="card__title">Levels</span></div>
+        <div class="card__body">
+          <div class="levels-row" id="levels-row">
+            <div class="level-item"><div class="level-item__label entry">Entry</div><div class="level-item__price">—</div></div>
+            <div class="level-item"><div class="level-item__label tp">TP1</div><div class="level-item__price">—</div></div>
+            <div class="level-item"><div class="level-item__label tp">TP2</div><div class="level-item__price">—</div></div>
+            <div class="level-item"><div class="level-item__label tp">TP3</div><div class="level-item__price">—</div></div>
+            <div class="level-item"><div class="level-item__label sl">SL</div><div class="level-item__price">—</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Conditions -->
+      <div class="card fade-up fade-up-d2">
+        <div class="card__header"><span class="card__title">Entry Conditions</span></div>
+        <div class="card__body">
+          <div class="conditions-row" id="conditions-row">
+            <span class="cond-chip missed">— stochrsi</span>
+            <span class="cond-chip missed">— macd</span>
+            <span class="cond-chip missed">— keltner</span>
+            <span class="cond-chip missed">— asian range</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Indicators -->
+      <div class="card fade-up fade-up-d3">
+        <div class="card__header"><span class="card__title">Indicators</span></div>
+        <div class="card__body">
+          <div class="indicator-row" id="indicators-grid">
+            <div class="indi-card"><div class="indi-card__name">ADX</div><div class="indi-card__val">—</div><div class="indi-card__tag neutral">—</div></div>
+            <div class="indi-card"><div class="indi-card__name">StochRSI</div><div class="indi-card__val">—</div><div class="indi-card__tag neutral">—</div></div>
+            <div class="indi-card"><div class="indi-card__name">MACD</div><div class="indi-card__val">—</div><div class="indi-card__tag neutral">—</div></div>
+            <div class="indi-card"><div class="indi-card__name">ATR</div><div class="indi-card__val">—</div><div class="indi-card__tag neutral">—</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- DXY -->
+      <div class="card fade-up fade-up-d4">
+        <div class="card__header"><span class="card__title">DXY Correlation</span></div>
+        <div class="card__body">
+          <div class="dxy-row" id="dxy-widget">
+            <div>
+              <div style="font-size:10px;color:var(--text-tertiary);margin-bottom:2px">US Dollar Index</div>
+              <div class="dxy-row__price">—</div>
+            </div>
+            <div class="dxy-row__corr neutral">—</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ═══ PAGE: CHART ═══ -->
+    <div class="page" id="page-chart">
+      <div class="chart-fullscreen">
+        <div class="chart-toolbar">
+          <span class="chart-toolbar__title">XAUUSD · M15</span>
+          <div class="tf-group">
+            <button class="tf-btn active" data-tf="15">M15</button>
+            <button class="tf-btn" data-tf="60">H1</button>
+            <button class="tf-btn" data-tf="240">H4</button>
+          </div>
+        </div>
+        <div id="chart-canvas"></div>
+      </div>
+    </div>
+
+    <!-- ═══ PAGE: HISTORY ═══ -->
+    <div class="page" id="page-history">
+      <div class="card">
+        <div class="card__header"><span class="card__title">Signal History</span></div>
+        <div class="history-list" id="history-list">
+          <div class="empty-state">
+            <div class="empty-state__icon">📜</div>
+            <div class="empty-state__title">No signals yet</div>
+            <div class="empty-state__sub">Signals will appear here as they're generated</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Upcoming Events -->
+      <div class="card mt-12">
+        <div class="card__header"><span class="card__title">Economic Calendar</span></div>
+        <div id="events-list" class="card__body">
+          <div class="empty-state" style="padding:24px">
+            <div class="empty-state__sub">No upcoming high-impact events</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ PAGE: STATS ═══ -->
+    <div class="page" id="page-stats">
+      <!-- Win Rate Hero -->
+      <div class="card">
+        <div class="stats-hero" id="stats-hero">
+          <div class="stats-hero__winrate">—%</div>
+          <div class="stats-hero__label">Win Rate</div>
+        </div>
+      </div>
+
+      <!-- Stat Tiles -->
+      <div class="card mt-12">
+        <div class="card__body">
+          <div class="stats-grid" id="stats-grid">
+            <div class="stat-tile">
+              <div class="stat-tile__label">Total Signals</div>
+              <div class="stat-tile__value">0</div>
+            </div>
+            <div class="stat-tile">
+              <div class="stat-tile__label">Total Pips</div>
+              <div class="stat-tile__value">0</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TP Breakdown -->
+      <div class="card mt-12">
+        <div class="card__header"><span class="card__title">TP Breakdown</span></div>
+        <div class="card__body">
+          <div class="tp-breakdown" id="tp-breakdown">
+            <div class="tp-bar-item"><div class="tp-bar-item__bar tp1"></div><div class="tp-bar-item__count">0</div><div class="tp-bar-item__label">TP1</div></div>
+            <div class="tp-bar-item"><div class="tp-bar-item__bar tp2"></div><div class="tp-bar-item__count">0</div><div class="tp-bar-item__label">TP2</div></div>
+            <div class="tp-bar-item"><div class="tp-bar-item__bar tp3"></div><div class="tp-bar-item__count">0</div><div class="tp-bar-item__label">TP3</div></div>
+            <div class="tp-bar-item"><div class="tp-bar-item__bar sl"></div><div class="tp-bar-item__count">0</div><div class="tp-bar-item__label">SL</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Risk Calculator -->
+      <div class="card mt-12">
+        <div class="card__header"><span class="card__title">💰 Risk Calculator</span></div>
+        <div class="card__body">
+          <div class="risk-grid" id="risk-calc-body">
+            <div class="risk-input">
+              <label>Lot Size</label>
+              <input type="number" id="lot-input" value="0.01" step="0.01" min="0.01">
+            </div>
+            <div class="risk-val"><div class="risk-val__label">Risk</div><div class="risk-val__num text-muted">—</div></div>
+            <div class="risk-val"><div class="risk-val__label">TP1</div><div class="risk-val__num text-muted">—</div></div>
+            <div class="risk-val"><div class="risk-val__label">TP2</div><div class="risk-val__num text-muted">—</div></div>
+            <div class="risk-val"><div class="risk-val__label">TP3</div><div class="risk-val__num text-muted">—</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /pages -->
+
+  <!-- ══════════ BOTTOM NAV ══════════ -->
+  <nav class="bottom-nav" id="bottom-nav">
+    <button class="nav-item active" data-page="signal">
+      <span class="nav-item__icon">📊</span>
+      <span class="nav-item__label">Signal</span>
+    </button>
+    <button class="nav-item" data-page="chart">
+      <span class="nav-item__icon">📈</span>
+      <span class="nav-item__label">Chart</span>
+    </button>
+    <button class="nav-item" data-page="history">
+      <span class="nav-item__icon">📜</span>
+      <span class="nav-item__label">History</span>
+    </button>
+    <button class="nav-item" data-page="stats">
+      <span class="nav-item__icon">📉</span>
+      <span class="nav-item__label">Stats</span>
+    </button>
+  </nav>
+
+</div><!-- /app -->
+
+<script src="js/api.js"></script>
+<script src="js/chart.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+
+</body>
+</html>
