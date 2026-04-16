@@ -23,8 +23,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Validate required secrets
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          [ -n "$SUPABASE_URL" ] || (echo "Missing secret: SUPABASE_URL" && exit 1)
+          [ -n "$SUPABASE_SERVICE_KEY" ] || (echo "Missing secret: SUPABASE_SERVICE_KEY" && exit 1)
+
       - name: Run calendar scraper
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python calendar_scraper.py

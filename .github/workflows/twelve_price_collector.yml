@@ -1,21 +1,21 @@
-name: XAUUSD Signal Bot
+name: Twelve Data Price Collector
 
 on:
   schedule:
-    - cron: '2-59/5 * * * *'  # Every 5 minutes, offset from top-of-hour load
-  workflow_dispatch:  # Manual trigger
+    - cron: "2-59/5 * * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: xauusd-signal-bot
+  group: xauusd-price-collector
   cancel-in-progress: true
 
 jobs:
-  generate-signals:
+  collect-price:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 4
 
     steps:
       - name: Checkout code
@@ -24,8 +24,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -40,9 +40,19 @@ jobs:
           [ -n "$SUPABASE_URL" ] || (echo "Missing secret: SUPABASE_URL" && exit 1)
           [ -n "$SUPABASE_SERVICE_KEY" ] || (echo "Missing secret: SUPABASE_SERVICE_KEY" && exit 1)
 
-      - name: Run signal generator
+      - name: Collect cycle 1
         env:
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python signal_generator.py
+        run: python twelve_price_collector.py
+
+      - name: Sleep for 150s
+        run: sleep 150
+
+      - name: Collect cycle 2
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python twelve_price_collector.py

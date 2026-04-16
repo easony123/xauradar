@@ -149,6 +149,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .status-indicator {
@@ -184,6 +185,10 @@ body {
   font-weight: 600;
   background: var(--gold-dim);
   color: var(--gold);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .source-badge {
@@ -853,13 +858,32 @@ body {
 
 /* ── Responsive ───────────────────────────────────────────── */
 @media (min-width: 768px) {
-  .app { max-width: 480px; margin: 0 auto; border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
-  .bottom-nav { max-width: 480px; left: 50%; transform: translateX(-50%); }
+  .app {
+    max-width: 100%;
+    margin: 0;
+    border-left: 0;
+    border-right: 0;
+  }
+  .topbar { padding: 0 clamp(16px, 4vw, 40px); }
+  .page {
+    padding-left: clamp(18px, 4vw, 44px);
+    padding-right: clamp(18px, 4vw, 44px);
+  }
+  .bottom-nav {
+    max-width: min(900px, calc(100% - 32px));
+    left: 50%;
+    transform: translateX(-50%);
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    border-top-left-radius: 14px;
+    border-top-right-radius: 14px;
+  }
 }
 
 @media (max-width: 380px) {
   .topbar { padding: 0 10px; }
   .topbar__right { gap: 6px; }
+  .session-pill { max-width: 136px; }
   .session-pill { padding: 3px 8px; font-size: 10px; }
   .source-badge { min-width: 56px; padding: 3px 6px; font-size: 9px; }
   .levels-row { grid-template-columns: repeat(3, 1fr); }

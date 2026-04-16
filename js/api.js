@@ -1,70 +1,18 @@
-/**
- * api.js — Data layer
- * Handles Massive.com/Polygon live price polling and Supabase data reads.
+﻿/**
+ * api.js - Data layer
+ * Uses Supabase as the single browser-side data source.
+ * Market prices are collected server-side and stored in `market_ticks`.
  */
-
-// ── Config ───────────────────────────────────────────────────
-const MASSIVE_API_KEY = '34FMvo_3DD6hL54apDwMKPXNk_aa86uv';
-const MASSIVE_BASE = 'https://api.polygon.io';
-const XAU_QUOTE_PATH = '/v1/last_quote/currencies/XAU/USD';
-const XAU_AGG_PREV_PATH = '/v2/aggs/ticker/C:XAUUSD/prev';
 
 // Supabase config
 const SUPABASE_URL = 'https://autbjwirftpixizrrzhw.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_A_gXMbmff2IFJbZX1wsKrA_sXz6jzkQ';
 
-// ── State ────────────────────────────────────────────────────
+// State
 let supabaseClient = null;
 let lastPrice = null;
 let priceDirection = null; // 'up' | 'down' | null
 let lastLiveSnapshot = null;
-let quoteEndpointDisabled = false;
-let backoffUntilTs = 0;
-let backoffMs = 0;
-
-const BACKOFF_BASE_MS = 30 * 1000;
-const BACKOFF_MAX_MS = 5 * 60 * 1000;
-
-function setRateLimitBackoff() {
-  backoffMs = backoffMs > 0 ? Math.min(backoffMs * 2, BACKOFF_MAX_MS) : BACKOFF_BASE_MS;
-  backoffUntilTs = Date.now() + backoffMs;
-  console.warn(`Rate-limited by API. Backing off for ${Math.round(backoffMs / 1000)}s.`);
-}
-
-function clearRateLimitBackoff() {
-  backoffMs = 0;
-  backoffUntilTs = 0;
-}
-
-function createHttpError(status, data, fallbackMessage = '') {
-  const apiMessage = (data && (data.message || data.error)) || fallbackMessage || `HTTP ${status}`;
-  const err = new Error(apiMessage);
-  err.status = status;
-  err.data = data || null;
-  return err;
-}
-
-async function fetchJson(url) {
-  const resp = await fetch(url);
-  const text = await resp.text();
-  let data = null;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = null;
-  }
-
-  if (!resp.ok) {
-    throw createHttpError(resp.status, data, `HTTP ${resp.status}`);
-  }
-
-  // Some APIs may return HTTP 200 with logical error payloads.
-  if (data && data.status === 'ERROR') {
-    throw createHttpError(resp.status, data, 'API status=ERROR');
-  }
-
-  return data;
-}
 
 function tryParseJson(value) {
   if (typeof value !== 'string') return value;
@@ -73,6 +21,18 @@ function tryParseJson(value) {
   } catch {
     return value;
   }
+}
+
+function parseNumber(value, fallback = 0) {
+  const n = typeof value === 'number' ? value : parseFloat(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function toMillis(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  const t = d.getTime();
+  return Number.isFinite(t) ? t : null;
 }
 
 function normalizeSignal(signal) {
@@ -109,222 +69,165 @@ function normalizeSnapshot(snapshot) {
 
 /**
  * Initialize Supabase client.
- * Must be called after the CDN script loads.
  */
 function initSupabase() {
   if (typeof supabase !== 'undefined' && supabase.createClient) {
     supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    console.log('✅ Supabase initialized');
+    console.log('Supabase initialized');
     return true;
   }
-  console.warn('⚠️ Supabase SDK not loaded');
+  console.warn('Supabase SDK not loaded');
   return false;
 }
 
-// ── Massive.com API ──────────────────────────────────────────
-
 /**
- * Fetch latest XAUUSD mid-price from Massive.com forex quotes.
- * Returns: { price, bid, ask, direction, timestamp }
+ * Fetch latest market tick from Supabase cache.
+ * Returns: { price, bid, ask, direction, spread, timestamp, source, isDelayed, pair }
  */
-async function fetchLastQuotePrice() {
-  const url = `${MASSIVE_BASE}${XAU_QUOTE_PATH}?apiKey=${MASSIVE_API_KEY}`;
-  const data = await fetchJson(url);
-  const last = data && data.last ? data.last : null;
-  const bid = last && Number.isFinite(last.bid) ? last.bid : null;
-  const ask = last && Number.isFinite(last.ask) ? last.ask : null;
-
-  if (!bid || !ask || bid <= 0 || ask <= 0) {
-    const status = data && data.status ? data.status : 'UNKNOWN';
-    throw new Error(`Quote unavailable (${status})`);
-  }
-
-  return {
-    price: (bid + ask) / 2,
-    bid,
-    ask,
-    spread: ask - bid,
-    timestamp: last.timestamp || Date.now(),
-    source: 'quote',
-    isDelayed: false,
-    pair: data.symbol || 'XAU/USD',
-  };
-}
-
-async function fetchPrevAggregatePrice() {
-  const url = `${MASSIVE_BASE}${XAU_AGG_PREV_PATH}?adjusted=true&apiKey=${MASSIVE_API_KEY}`;
-  const data = await fetchJson(url);
-  if (!data.results || data.results.length === 0) {
-    throw new Error('No aggregate data');
-  }
-
-  const r = data.results[0];
-  const price = Number.isFinite(r.c) ? r.c : 0;
-  if (!price) throw new Error('Invalid aggregate price');
-
-  return {
-    price,
-    bid: price,
-    ask: price,
-    spread: 0,
-    timestamp: r.t || Date.now(),
-    source: 'agg_prev',
-    isDelayed: true,
-    pair: data.ticker || 'C:XAUUSD',
-  };
-}
-
-async function fetchMinuteAggregatePrice() {
-  const now = Date.now();
-  const from = now - 45 * 60 * 1000; // smaller request window to reduce load
-  const url = `${MASSIVE_BASE}/v2/aggs/ticker/C:XAUUSD/range/1/minute/${from}/${now}?adjusted=true&sort=asc&limit=45&apiKey=${MASSIVE_API_KEY}`;
-  const data = await fetchJson(url);
-  if (!data.results || data.results.length === 0) {
-    throw new Error('No minute aggregate data');
-  }
-
-  const r = data.results[data.results.length - 1];
-  const price = Number.isFinite(r.c) ? r.c : 0;
-  if (!price) throw new Error('Invalid minute aggregate price');
-
-  return {
-    price,
-    bid: price,
-    ask: price,
-    spread: 0,
-    timestamp: r.t || Date.now(),
-    source: 'agg_1m',
-    isDelayed: true,
-    pair: data.ticker || 'C:XAUUSD',
-  };
-}
-
 async function fetchLivePrice() {
+  if (!supabaseClient) return lastLiveSnapshot;
+
   try {
-    if (Date.now() < backoffUntilTs) {
-      return lastLiveSnapshot;
-    }
+    const { data, error } = await supabaseClient
+      .from('market_ticks')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(1);
 
-    let live = null;
+    if (error) throw error;
+    if (!data || data.length === 0) return lastLiveSnapshot;
 
-    if (!quoteEndpointDisabled) {
-      try {
-        live = await fetchLastQuotePrice();
-      } catch (quoteErr) {
-        if (quoteErr.status === 403) {
-          quoteEndpointDisabled = true;
-          console.warn('Quote endpoint not authorized for current plan. Switching to aggregate-only mode.');
-        } else if (quoteErr.status === 429) {
-          setRateLimitBackoff();
-          return lastLiveSnapshot;
-        }
-      }
-    }
+    const row = data[0];
+    const price = parseNumber(row.price, 0);
+    if (!price) return lastLiveSnapshot;
 
-    if (!live) {
-      try {
-        live = await fetchMinuteAggregatePrice();
-      } catch (minuteErr) {
-        if (minuteErr.status === 429) {
-          setRateLimitBackoff();
-          return lastLiveSnapshot;
-        }
-        live = await fetchPrevAggregatePrice();
-      }
-    }
+    const bid = parseNumber(row.bid, price);
+    const ask = parseNumber(row.ask, price);
+    const ts = toMillis(row.provider_ts) || toMillis(row.created_at) || Date.now();
 
-    if (!live || !live.price) return null;
-    clearRateLimitBackoff();
-
-    // Determine direction
     if (lastPrice !== null) {
-      priceDirection = live.price > lastPrice ? 'up' : live.price < lastPrice ? 'down' : priceDirection;
+      priceDirection = price > lastPrice ? 'up' : price < lastPrice ? 'down' : priceDirection;
     }
-    lastPrice = live.price;
+    lastPrice = price;
 
+    const ageMin = Math.max(0, Math.floor((Date.now() - ts) / 60000));
+    const stale = ageMin >= 15;
+
+    const source = (row.source || 'STALE').toUpperCase();
     const snapshot = {
-      price: live.price,
-      bid: live.bid,
-      ask: live.ask,
+      price,
+      bid,
+      ask,
       direction: priceDirection,
-      spread: live.spread,
-      timestamp: live.timestamp,
-      source: live.source,
-      isDelayed: live.isDelayed,
-      pair: live.pair,
+      spread: Math.max(0, ask - bid),
+      timestamp: ts,
+      source: stale ? 'STALE' : source,
+      isDelayed: Boolean(row.is_delayed) || stale,
+      pair: row.symbol || 'XAU/USD',
     };
+
     lastLiveSnapshot = snapshot;
     return snapshot;
   } catch (err) {
-    if (err && err.status === 429) {
-      setRateLimitBackoff();
-    }
-    console.error('Price fetch error:', err.message);
+    console.error('Supabase live price error:', err.message);
     return lastLiveSnapshot;
   }
 }
 
-async function fetchLivePriceSnapshot() {
-  return await fetchLivePrice();
-}
-
 /**
- * Fetch M15 OHLCV candles for the chart.
- * Returns array of { time, open, high, low, close }
+ * Aggregate cached ticks into OHLC candles for the chart.
  */
-async function fetchCandles(bars = 100) {
+async function fetchChartCandles(bars = 100, minutes = 15) {
+  if (!supabaseClient) return [];
+
   try {
     const now = Date.now();
-    const from = now - bars * 15 * 60 * 1000 - 60 * 60 * 1000 * 24; // go back an extra day just in case of delays
-    const url = `${MASSIVE_BASE}/v2/aggs/ticker/C:XAUUSD/range/15/minute/${from}/${now}?adjusted=true&sort=asc&limit=${bars}&apiKey=${MASSIVE_API_KEY}`;
+    const bucketMs = minutes * 60 * 1000;
+    const from = new Date(now - (bars * bucketMs) - (6 * bucketMs)).toISOString();
 
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
+    const { data, error } = await supabaseClient
+      .from('market_ticks')
+      .select('created_at,provider_ts,price')
+      .gte('created_at', from)
+      .order('created_at', { ascending: true })
+      .limit(5000);
 
-    if (!data.results || data.results.length === 0) return [];
+    if (error) throw error;
+    if (!data || data.length === 0) return [];
 
-    return data.results.map((r) => ({
-      time: Math.floor(r.t / 1000), // Unix seconds for Lightweight Charts
-      open: r.o,
-      high: r.h,
-      low: r.l,
-      close: r.c,
-      volume: r.v || 0,
-    }));
+    const buckets = new Map();
+
+    data.forEach((row) => {
+      const price = parseNumber(row.price, NaN);
+      if (!Number.isFinite(price)) return;
+
+      const ts = toMillis(row.provider_ts) || toMillis(row.created_at);
+      if (!ts) return;
+
+      const bucket = Math.floor(ts / bucketMs) * bucketMs;
+      const cur = buckets.get(bucket);
+
+      if (!cur) {
+        buckets.set(bucket, {
+          time: Math.floor(bucket / 1000),
+          open: price,
+          high: price,
+          low: price,
+          close: price,
+          _lastTs: ts,
+        });
+        return;
+      }
+
+      cur.high = Math.max(cur.high, price);
+      cur.low = Math.min(cur.low, price);
+      if (ts >= cur._lastTs) {
+        cur.close = price;
+        cur._lastTs = ts;
+      }
+    });
+
+    const candles = Array.from(buckets.values())
+      .sort((a, b) => a.time - b.time)
+      .slice(-bars)
+      .map((c) => ({
+        time: c.time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      }));
+
+    return candles;
   } catch (err) {
-    console.error('Candle fetch error:', err.message);
+    console.error('Chart candle fetch error:', err.message);
     return [];
   }
 }
 
 /**
- * Fetch DXY price for the correlation widget.
+ * Keep legacy method name for compatibility with existing callers.
  */
-async function fetchDXYPrice() {
-  try {
-    const url = `${MASSIVE_BASE}/v2/aggs/ticker/C:DXY/prev?adjusted=true&apiKey=${MASSIVE_API_KEY}`;
-    const resp = await fetch(url);
-    if (!resp.ok) return null;
-    const data = await resp.json();
-
-    if (data.results && data.results.length > 0) {
-      return {
-        price: data.results[0].c,
-        direction: data.results[0].c > data.results[0].o ? 'UP' : 'DOWN',
-      };
-    }
-    return null;
-  } catch {
-    return null;
-  }
+async function fetchCandles(bars = 100) {
+  return await fetchChartCandles(bars, 15);
 }
 
-// ── Supabase Reads ───────────────────────────────────────────
-
 /**
- * Fetch the latest ACTIVE signal.
+ * Fetch DXY from latest indicator snapshot (server-side populated).
  */
+async function fetchDXYPrice() {
+  const snapshot = await fetchIndicatorSnapshot();
+  if (!snapshot) return null;
+
+  const price = parseNumber(snapshot.dxy_price, 0);
+  if (!price) return null;
+
+  return {
+    price,
+    direction: snapshot.dxy_direction || 'FLAT',
+  };
+}
+
 async function fetchActiveSignal() {
   if (!supabaseClient) return null;
   try {
@@ -343,9 +246,6 @@ async function fetchActiveSignal() {
   }
 }
 
-/**
- * Fetch last N signals for history.
- */
 async function fetchSignalHistory(limit = 20) {
   if (!supabaseClient) return [];
   try {
@@ -363,9 +263,6 @@ async function fetchSignalHistory(limit = 20) {
   }
 }
 
-/**
- * Fetch latest indicator snapshot.
- */
 async function fetchIndicatorSnapshot() {
   if (!supabaseClient) return null;
   try {
@@ -383,9 +280,6 @@ async function fetchIndicatorSnapshot() {
   }
 }
 
-/**
- * Fetch upcoming economic events (next 24h).
- */
 async function fetchUpcomingEvents() {
   if (!supabaseClient) return [];
   try {
@@ -408,9 +302,6 @@ async function fetchUpcomingEvents() {
   }
 }
 
-/**
- * Compute performance stats from signal history.
- */
 async function fetchPerformanceStats() {
   if (!supabaseClient) return null;
   try {
@@ -431,7 +322,6 @@ async function fetchPerformanceStats() {
     const wins = tp1.length;
     const total = closed.length || 1;
 
-    // Estimate pips from ATR
     let totalPips = 0;
     closed.forEach((s) => {
       const atr = parseFloat(s.atr_value) || 10;
@@ -456,11 +346,11 @@ async function fetchPerformanceStats() {
   }
 }
 
-// ── Exports ──────────────────────────────────────────────────
 window.API = {
   initSupabase,
   fetchLivePrice,
   fetchCandles,
+  fetchChartCandles,
   fetchDXYPrice,
   fetchActiveSignal,
   fetchSignalHistory,

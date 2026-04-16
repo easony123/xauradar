@@ -93,25 +93,15 @@ async function loadCandles(bars = 100, minutes = 15) {
   if (!candleSeries) return;
 
   try {
-    const now = Date.now();
-    const from = now - bars * minutes * 60 * 1000 - 60 * 60 * 1000 * 24; // go back an extra day just in case of delays
-    const url = `https://api.polygon.io/v2/aggs/ticker/C:XAUUSD/range/${minutes}/minute/${from}/${now}?adjusted=true&sort=asc&limit=${bars}&apiKey=34FMvo_3DD6hL54apDwMKPXNk_aa86uv`;
-
-    const resp = await fetch(url);
-    if (!resp.ok) return;
-    const data = await resp.json();
-    if (!data.results || data.results.length === 0) return;
-
-    const candles = data.results.map((r) => ({
-      time: Math.floor(r.t / 1000),
-      open: r.o,
-      high: r.h,
-      low: r.l,
-      close: r.c,
-    }));
+    if (!window.API || !window.API.fetchChartCandles) return;
+    const candles = await window.API.fetchChartCandles(bars, minutes);
+    if (!candles || candles.length === 0) return;
 
     candleSeries.setData(candles);
     chart.timeScale().fitContent();
+    if (window.__currentSignal) {
+      drawSignalOverlay(window.__currentSignal);
+    }
   } catch (err) {
     console.error('Chart candle error:', err.message);
   }

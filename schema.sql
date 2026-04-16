@@ -50,10 +50,25 @@ CREATE TABLE IF NOT EXISTS economic_events (
   UNIQUE(event_date, event_name)
 );
 
--- 4. Enable Row Level Security (allow public reads)
+-- 4. Market ticks cache table (collector writes, frontend reads)
+CREATE TABLE IF NOT EXISTS market_ticks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_at TIMESTAMPTZ DEFAULT now(),
+  provider_ts TIMESTAMPTZ,
+  symbol TEXT DEFAULT 'XAU/USD',
+  price NUMERIC NOT NULL,
+  bid NUMERIC,
+  ask NUMERIC,
+  source TEXT DEFAULT 'TD_DELAYED',
+  is_delayed BOOLEAN DEFAULT true,
+  meta JSONB DEFAULT '{}'
+);
+
+-- 5. Enable Row Level Security (allow public reads)
 ALTER TABLE signals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE indicator_snapshots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE economic_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE market_ticks ENABLE ROW LEVEL SECURITY;
 
 -- Allow anonymous reads for frontend
 CREATE POLICY "Allow public read on signals"
@@ -66,6 +81,10 @@ CREATE POLICY "Allow public read on indicator_snapshots"
 
 CREATE POLICY "Allow public read on economic_events"
   ON economic_events FOR SELECT
+  USING (true);
+
+CREATE POLICY "Allow public read on market_ticks"
+  ON market_ticks FOR SELECT
   USING (true);
 
 -- Allow service role inserts/updates (for Python bot)
@@ -84,15 +103,22 @@ CREATE POLICY "Allow service write on economic_events"
   USING (true)
   WITH CHECK (true);
 
--- 5. Enable Realtime on key tables
+CREATE POLICY "Allow service write on market_ticks"
+  ON market_ticks FOR ALL
+  USING (true)
+  WITH CHECK (true);
+
+-- 6. Enable Realtime on key tables
 ALTER PUBLICATION supabase_realtime ADD TABLE signals;
 ALTER PUBLICATION supabase_realtime ADD TABLE indicator_snapshots;
+ALTER PUBLICATION supabase_realtime ADD TABLE market_ticks;
 
--- 6. Indexes for performance
+-- 7. Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status);
 CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_indicator_created ON indicator_snapshots(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_date ON economic_events(event_date);
+CREATE INDEX IF NOT EXISTS idx_market_ticks_created ON market_ticks(created_at DESC);
 
--- 7. Auto-cleanup: delete indicator snapshots older than 7 days (run via pg_cron or manually)
+-- 8. Auto-cleanup: delete indicator snapshots older than 7 days (run via pg_cron or manually)
 -- SELECT cron.schedule('cleanup-snapshots', '0 0 * * *', $$DELETE FROM indicator_snapshots WHERE created_at < NOW() - INTERVAL '7 days'$$);

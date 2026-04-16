@@ -8,6 +8,26 @@ let currentSignal = null;
 let lastSignalId = null;
 window._lastPriceDirection = null;
 
+function deriveStatsFromHistory(signals) {
+  if (!signals || signals.length === 0) return null;
+  const closed = signals.filter((s) => (s.status || 'ACTIVE') !== 'ACTIVE');
+  const tp1 = closed.filter((s) => ['HIT_TP1', 'HIT_TP2', 'HIT_TP3'].includes(s.status));
+  const tp2 = closed.filter((s) => ['HIT_TP2', 'HIT_TP3'].includes(s.status));
+  const tp3 = closed.filter((s) => s.status === 'HIT_TP3');
+  const sl = closed.filter((s) => s.status === 'HIT_SL');
+  const total = closed.length || 1;
+  const winRate = ((tp1.length / total) * 100).toFixed(1);
+  return {
+    totalSignals: signals.length,
+    winRate,
+    totalPips: '0.0',
+    tp1Hits: tp1.length,
+    tp2Hits: tp2.length,
+    tp3Hits: tp3.length,
+    slHits: sl.length,
+  };
+}
+
 // ── Init ─────────────────────────────────────────────────────
 
 async function boot() {
@@ -72,6 +92,7 @@ async function pollSupabase() {
 
     // Signal
     currentSignal = signal;
+    window.__currentSignal = signal;
     UI.renderSignalHero(signal);
     UI.renderLevels(signal);
     if (window.Chart && window.Chart.isInitialized()) {
@@ -99,7 +120,7 @@ async function pollSupabase() {
     UI.renderHistory(history);
 
     // Stats
-    UI.renderStats(stats);
+    UI.renderStats(stats || deriveStatsFromHistory(history));
 
   } catch (err) {
     console.error('Supabase poll error:', err.message);

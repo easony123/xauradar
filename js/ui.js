@@ -139,13 +139,16 @@ function updateHeaderPrice(priceData) {
     const ts = Number(priceData.timestamp) || Date.now();
     const ageMin = Math.max(0, Math.floor((Date.now() - ts) / 60000));
     const ageText = ageMin < 1 ? 'now' : ageMin < 60 ? `${ageMin}m ago` : `${Math.floor(ageMin / 60)}h ago`;
+    const source = (priceData.source || '').toUpperCase();
 
-    if (priceData.source === 'quote') {
-      changeEl.textContent = `Spread: ${priceData.spread.toFixed(2)} | Real-time`;
-    } else if (priceData.source === 'agg_1m') {
-      changeEl.textContent = `Source: 1m close | Delayed by data plan (${ageText})`;
+    if (source === 'TD_LIVE') {
+      changeEl.textContent = `Spread: ${priceData.spread.toFixed(2)} | Twelve Data live`;
+    } else if (source === 'TD_DELAYED') {
+      changeEl.textContent = `Source: Twelve Data delayed (${ageText})`;
+    } else if (source === 'STALE') {
+      changeEl.textContent = `Source: stale cache (${ageText})`;
     } else {
-      changeEl.textContent = `Source: Prev close | Delayed by data plan (${ageText})`;
+      changeEl.textContent = `Source: unknown (${ageText})`;
     }
     changeEl.className = 'topbar__change';
   }
@@ -156,15 +159,15 @@ function updateHeaderPrice(priceData) {
 
   if (sourceEl) {
     const sourceMap = {
-      quote: { label: 'QUOTE', cls: 'source-badge--quote' },
-      agg_1m: { label: '1M', cls: 'source-badge--1m' },
-      agg_prev: { label: 'PREV', cls: 'source-badge--prev' },
+      TD_LIVE: { label: 'LIVE', announce: 'TD_LIVE', cls: 'source-badge--quote' },
+      TD_DELAYED: { label: 'DELAY', announce: 'TD_DELAYED', cls: 'source-badge--1m' },
+      STALE: { label: 'STALE', announce: 'STALE', cls: 'source-badge--prev' },
     };
-    const mapped = sourceMap[priceData.source] || { label: '--', cls: 'source-badge--unknown' };
+    const mapped = sourceMap[(priceData.source || '').toUpperCase()] || { label: '--', cls: 'source-badge--unknown' };
 
     sourceEl.textContent = `SRC: ${mapped.label}`;
     sourceEl.className = `source-badge ${mapped.cls}`;
-    sourceEl.setAttribute('aria-label', `Price source: ${mapped.label}`);
+    sourceEl.setAttribute('aria-label', `Price source: ${mapped.announce || mapped.label}`);
   }
 }
 

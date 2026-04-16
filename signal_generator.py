@@ -2,37 +2,37 @@
 XAUUSD Trading Signal Generator
 ================================
 Runs every 5 minutes via GitHub Actions.
-Fetches M15/H1 candles from Massive.com (Polygon.io compatible API),
-computes indicators, generates BUY/SELL signals, and writes to Supabase.
+Fetches M15/H1 candles from Twelve Data, computes indicators,
+generates BUY/SELL signals, and writes to Supabase.
 """
 
-import os
-import time
 import json
 import math
-import requests
+import os
+from datetime import datetime, timedelta, timezone
+
 import pandas as pd
 import pandas_ta as ta
-from datetime import datetime, timedelta, timezone
-from supabase import create_client, Client
+import requests
 from dotenv import load_dotenv
+from supabase import Client, create_client
 
 load_dotenv()
 
-# â”€â”€ Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-MASSIVE_API_KEY = os.getenv("MASSIVE_API_KEY", "34FMvo_3DD6hL54apDwMKPXNk_aa86uv")
+TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-BASE_URL = "https://api.polygon.io"
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
+TWELVE_BASE_URL = "https://api.twelvedata.com"
 
-# Initialize Supabase
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY/SUPABASE_KEY")
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# â”€â”€ Asian Session Range (00:00â€“08:00 UTC) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Session / strategy config
 ASIAN_SESSION_START_HOUR = 0
 ASIAN_SESSION_END_HOUR = 8
 
-# Signal framework config
 NEWS_BLACKOUT_MINUTES = 15
 TREND_ADX_MIN = 22
 RANGE_ADX_MAX = 18
@@ -51,128 +51,132 @@ SL_COOLDOWN_MINUTES = 30
 
 
 def fetch_candles(symbol: str, multiplier: int, timespan: str, bars: int = 100) -> pd.DataFrame | None:
-    """
-    Fetch OHLCV candles from Massive.com / Polygon-compatible API.
-    symbol: e.g. "C:XAUUSD"
-    multiplier: e.g. 15 (for 15-min)
-    timespan: "minute" or "hour"
-    bars: how many bars to fetch
-    """
-    now = datetime.now(timezone.utc)
+    """Fetch OHLCV candles from Twelve Data /time_series endpoint."""
+    if not TWELVE_DATA_API_KEY:
+        print("  ERROR: Missing TWELVE_DATA_API_KEY")
+        return None
 
-    # Calculate 'from' timestamp based on bars requested
-    if timespan == "minute":
-        delta = timedelta(minutes=multiplier * bars + 60)
-    else:
-        delta = timedelta(hours=multiplier * bars + 4)
-
-    from_ts = int((now - delta).timestamp() * 1000)
-    to_ts = int(now.timestamp() * 1000)
-
-    url = f"{BASE_URL}/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_ts}/{to_ts}"
-    params = {
-        "adjusted": "true",
-        "sort": "asc",
-        "limit": bars,
-        "apiKey": MASSIVE_API_KEY,
-    }
+    interval = f"{multiplier}min" if timespan == "minute" else f"{multiplier}h"
 
     try:
-        resp = requests.get(url, params=params, timeout=30)
+        resp = requests.get(
+            f"{TWELVE_BASE_URL}/time_series",
+            params={
+                "symbol": symbol,
+                "interval": interval,
+                "outputsize": bars,
+                "order": "ASC",
+                "timezone": "UTC",
+                "apikey": TWELVE_DATA_API_KEY,
+            },
+            timeout=30,
+        )
         resp.raise_for_status()
         data = resp.json()
 
-        if data.get("resultsCount", 0) == 0:
-            print(f"  âš ï¸  No results for {symbol} {multiplier}{timespan}")
+        if str(data.get("status", "")).lower() == "error":
+            print(f"  ERROR: Twelve Data returned error for {symbol} {interval}: {data.get('message', 'unknown')}")
             return None
 
-        results = data["results"]
-        df = pd.DataFrame(results)
-        df = df.rename(columns={
-            "o": "Open",
-            "h": "High",
-            "l": "Low",
-            "c": "Close",
-            "v": "Volume",
-            "t": "Timestamp",
-        })
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"], unit="ms", utc=True)
+        values = data.get("values", [])
+        if not values:
+            print(f"  WARNING: No candles for {symbol} {interval}")
+            return None
+
+        df = pd.DataFrame(values)
+        required = ("open", "high", "low", "close", "datetime")
+        if not all(col in df.columns for col in required):
+            print(f"  ERROR: Unexpected candle payload for {symbol} {interval}")
+            return None
+
+        df = df.rename(
+            columns={
+                "open": "Open",
+                "high": "High",
+                "low": "Low",
+                "close": "Close",
+                "volume": "Volume",
+                "datetime": "Timestamp",
+            }
+        )
+        if "Volume" not in df.columns:
+            df["Volume"] = 0
+
+        df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True, errors="coerce")
+        df = df.dropna(subset=["Timestamp"])
         df = df.set_index("Timestamp")
         df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
-        return df
-
+        df = df.sort_index()
+        return df.tail(bars)
     except Exception as e:
-        print(f"  âŒ API error fetching {symbol}: {e}")
+        print(f"  ERROR fetching candles for {symbol} {interval}: {e}")
         return None
 
 
 def fetch_dxy_quote() -> dict | None:
-    """Fetch latest DXY quote for correlation analysis."""
-    url = f"{BASE_URL}/v2/aggs/ticker/C:DXY/prev"
-    params = {"adjusted": "true", "apiKey": MASSIVE_API_KEY}
+    """Optional DXY proxy fetch from Twelve Data. Returns None when unavailable."""
+    if not TWELVE_DATA_API_KEY:
+        return None
+
     try:
-        resp = requests.get(url, params=params, timeout=15)
+        resp = requests.get(
+            f"{TWELVE_BASE_URL}/price",
+            params={"symbol": "DXY", "apikey": TWELVE_DATA_API_KEY},
+            timeout=15,
+        )
         resp.raise_for_status()
         data = resp.json()
-        if "results" in data and len(data["results"]) > 0:
-            r = data["results"][0]
-            return {"price": r.get("c", 0)}
-        return None
-    except Exception as e:
-        print(f"  âš ï¸  DXY fetch error: {e}")
+
+        if str(data.get("status", "")).lower() == "error":
+            return None
+
+        price = data.get("price")
+        if price is None:
+            return None
+        return {"price": float(price)}
+    except Exception:
+        # DXY is optional; neutral confluence is fine.
         return None
 
 
 def calculate_m15_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate entry-timing indicators on M15 data."""
-    # StochRSI(14,3,3)
     stochrsi = df.ta.stochrsi(length=14, rsi_length=14, k=3, d=3)
     if stochrsi is not None:
         df["stochrsi_k"] = stochrsi.iloc[:, 0]
         df["stochrsi_d"] = stochrsi.iloc[:, 1]
 
-    # MACD(12,26,9)
     macd = df.ta.macd(fast=12, slow=26, signal=9)
     if macd is not None:
         df["macd_line"] = macd.iloc[:, 0]
         df["macd_signal"] = macd.iloc[:, 1]
         df["macd_histogram"] = macd.iloc[:, 2]
 
-    # Keltner Channels(20, 2Ã—ATR)
     kc = df.ta.kc(length=20, scalar=2)
     if kc is not None:
         df["keltner_lower"] = kc.iloc[:, 0]
         df["keltner_mid"] = kc.iloc[:, 1]
         df["keltner_upper"] = kc.iloc[:, 2]
 
-    # ATR(14)
     df["atr"] = df.ta.atr(length=14)
-
     return df
 
 
 def calculate_h1_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate structural-confirmation indicators on H1 data."""
-    # ADX(14)
     adx = df.ta.adx(length=14)
     if adx is not None:
-        df["adx"] = adx.iloc[:, 0]  # ADX value
-        df["dmp"] = adx.iloc[:, 1]  # +DI
-        df["dmn"] = adx.iloc[:, 2]  # -DI
+        df["adx"] = adx.iloc[:, 0]
+        df["dmp"] = adx.iloc[:, 1]
+        df["dmn"] = adx.iloc[:, 2]
 
-    # VWAP (session-based)
     vwap = df.ta.vwap()
     if vwap is not None:
         df["vwap"] = vwap
 
-    # SMA(50)
     df["sma50"] = df.ta.sma(length=50)
-
     return df
 
 
 def get_asian_session_range(df_m15: pd.DataFrame) -> dict | None:
-    """Calculate today's Asian session (00:00â€“08:00 UTC) high/low."""
     now = datetime.now(timezone.utc)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     asian_start = today.replace(hour=ASIAN_SESSION_START_HOUR)
@@ -188,49 +192,20 @@ def get_asian_session_range(df_m15: pd.DataFrame) -> dict | None:
     }
 
 
-def check_regime(df_h1: pd.DataFrame) -> dict:
-    """
-    STEP 1 â€” Regime check.
-    Returns: {"active": bool, "reason": str, "adx": float, "atr": float}
-    """
-    latest = df_h1.iloc[-1]
-    adx_val = latest.get("adx", 0)
-    atr_val = latest.get("atr", 0) if "atr" in latest else 0
-
-    # Compute ATR on H1 if not present
-    if atr_val == 0:
-        h1_atr = df_h1.ta.atr(length=14)
-        if h1_atr is not None and len(h1_atr) > 0:
-            atr_val = float(h1_atr.iloc[-1])
-
-    # ADX threshold
-    if pd.isna(adx_val) or adx_val < 20:
-        return {"active": False, "reason": "No trend (ADX < 20)", "adx": float(adx_val or 0), "atr": float(atr_val)}
-
-    # ATR must be above 20th percentile of last 100 bars
-    atr_series = df_h1.ta.atr(length=14)
-    if atr_series is not None and len(atr_series) > 10:
-        atr_20th = atr_series.quantile(0.2)
-        if atr_val < atr_20th:
-            return {"active": False, "reason": "Dead market (ATR below 20th pct)", "adx": float(adx_val), "atr": float(atr_val)}
-
-    return {"active": True, "reason": "Trending", "adx": float(adx_val), "atr": float(atr_val)}
-
-
 def check_news_blackout() -> bool:
-    """Return True when a high-impact event is in the configured blackout window."""
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(minutes=NEWS_BLACKOUT_MINUTES)
     window_end = now + timedelta(minutes=NEWS_BLACKOUT_MINUTES)
 
     try:
-        resp = supabase.table("economic_events") \
-            .select("*") \
-            .eq("impact", "HIGH") \
-            .gte("event_date", window_start.isoformat()) \
-            .lte("event_date", window_end.isoformat()) \
+        resp = (
+            supabase.table("economic_events")
+            .select("*")
+            .eq("impact", "HIGH")
+            .gte("event_date", window_start.isoformat())
+            .lte("event_date", window_end.isoformat())
             .execute()
-
+        )
         if resp.data and len(resp.data) > 0:
             event = resp.data[0]
             print(f"  WARNING: News blackout: {event['event_name']} within +/-{NEWS_BLACKOUT_MINUTES}m window")
@@ -240,27 +215,8 @@ def check_news_blackout() -> bool:
 
     return False
 
-def get_structural_bias(df_h1: pd.DataFrame) -> str:
-    """
-    STEP 3 â€” Structural bias from VWAP.
-    Returns "BUY_ONLY" or "SELL_ONLY"
-    """
-    latest = df_h1.iloc[-1]
-    vwap = latest.get("vwap", None)
-    close = latest["Close"]
-
-    if vwap is None or pd.isna(vwap):
-        # Fallback: use SMA50
-        sma = latest.get("sma50", None)
-        if sma is not None and not pd.isna(sma):
-            return "BUY_ONLY" if close > sma else "SELL_ONLY"
-        return "BUY_ONLY"  # Default bullish
-
-    return "BUY_ONLY" if close > vwap else "SELL_ONLY"
-
 
 def parse_signal_time(ts: str | None) -> datetime | None:
-    """Parse Supabase timestamp safely."""
     if not ts:
         return None
     try:
@@ -270,21 +226,18 @@ def parse_signal_time(ts: str | None) -> datetime | None:
 
 
 def get_risk_guard_state() -> dict:
-    """
-    Risk guard:
-    1) cooldown after latest SL
-    2) block after too many consecutive SL outcomes
-    """
     try:
-        resp = supabase.table("signals") \
-            .select("status,created_at") \
-            .neq("status", "ACTIVE") \
-            .order("created_at", desc=True) \
-            .limit(20) \
+        resp = (
+            supabase.table("signals")
+            .select("status,created_at")
+            .neq("status", "ACTIVE")
+            .order("created_at", desc=True)
+            .limit(20)
             .execute()
+        )
         closed = resp.data or []
     except Exception as e:
-        print(f"  âš ï¸ Could not read signal history for risk guard: {e}")
+        print(f"  WARNING: Could not read signal history for risk guard: {e}")
         return {
             "allow_entry": True,
             "reason": "history_unavailable",
@@ -294,8 +247,7 @@ def get_risk_guard_state() -> dict:
 
     consecutive_sl = 0
     for row in closed:
-        status = row.get("status")
-        if status == "HIT_SL":
+        if row.get("status") == "HIT_SL":
             consecutive_sl += 1
         else:
             break
@@ -329,7 +281,6 @@ def get_risk_guard_state() -> dict:
 
 
 def classify_regime(df_m15: pd.DataFrame, df_h1: pd.DataFrame, asian_range: dict | None) -> dict:
-    """Classify market regime for the decision engine."""
     latest_m15 = df_m15.iloc[-1]
     latest_h1 = df_h1.iloc[-1]
 
@@ -375,13 +326,21 @@ def classify_regime(df_m15: pd.DataFrame, df_h1: pd.DataFrame, asian_range: dict
     }
 
 
-def build_direction_conditions(
-    df_m15: pd.DataFrame,
-    direction: str,
-    asian_range: dict | None,
-    regime_name: str
-) -> dict:
-    """Direction-specific condition map used by the score engine."""
+def get_structural_bias(df_h1: pd.DataFrame) -> str:
+    latest = df_h1.iloc[-1]
+    vwap = latest.get("vwap", None)
+    close = latest["Close"]
+
+    if vwap is None or pd.isna(vwap):
+        sma = latest.get("sma50", None)
+        if sma is not None and not pd.isna(sma):
+            return "BUY_ONLY" if close > sma else "SELL_ONLY"
+        return "BUY_ONLY"
+
+    return "BUY_ONLY" if close > vwap else "SELL_ONLY"
+
+
+def build_direction_conditions(df_m15: pd.DataFrame, direction: str, asian_range: dict | None, regime_name: str) -> dict:
     latest = df_m15.iloc[-1]
     prev = df_m15.iloc[-2]
 
@@ -404,23 +363,15 @@ def build_direction_conditions(
         macd = (hist_now > hist_prev and hist_now > 0)
         keltner = (kc_upper is not None and not pd.isna(kc_upper) and close > float(kc_upper))
         pullback = (kc_mid is not None and not pd.isna(kc_mid) and close >= float(kc_mid))
-        asian_breakout = (
-            asian_range is not None and atr > 0 and close > (asian_range["high"] + (atr * BREAKOUT_BUFFER_ATR))
-        )
-        mean_reversion = (
-            regime_name == "RANGE" and kc_lower is not None and not pd.isna(kc_lower) and k_now < 15 and close <= float(kc_lower)
-        )
+        asian_breakout = (asian_range is not None and atr > 0 and close > (asian_range["high"] + (atr * BREAKOUT_BUFFER_ATR)))
+        mean_reversion = (regime_name == "RANGE" and kc_lower is not None and not pd.isna(kc_lower) and k_now < 15 and close <= float(kc_lower))
     else:
         stochrsi = (k_prev > d_prev and k_now < d_now and k_now > 65)
         macd = (hist_now < hist_prev and hist_now < 0)
         keltner = (kc_lower is not None and not pd.isna(kc_lower) and close < float(kc_lower))
         pullback = (kc_mid is not None and not pd.isna(kc_mid) and close <= float(kc_mid))
-        asian_breakout = (
-            asian_range is not None and atr > 0 and close < (asian_range["low"] - (atr * BREAKOUT_BUFFER_ATR))
-        )
-        mean_reversion = (
-            regime_name == "RANGE" and kc_upper is not None and not pd.isna(kc_upper) and k_now > 85 and close >= float(kc_upper)
-        )
+        asian_breakout = (asian_range is not None and atr > 0 and close < (asian_range["low"] - (atr * BREAKOUT_BUFFER_ATR)))
+        mean_reversion = (regime_name == "RANGE" and kc_upper is not None and not pd.isna(kc_upper) and k_now > 85 and close >= float(kc_upper))
 
     return {
         "stochrsi": bool(stochrsi),
@@ -433,27 +384,17 @@ def build_direction_conditions(
 
 
 def dxy_confluence(direction: str, dxy_data: dict | None) -> float:
-    """Simple DXY confluence score for gold (inverse tendency)."""
     if not dxy_data:
         return 0.0
     dxy_price = float(dxy_data.get("price", 0) or 0)
     if dxy_price <= 0:
         return 0.0
-
-    # Lightweight proxy around broad DXY baseline.
     if direction == "BUY":
         return 0.35 if dxy_price < 104 else -0.20
     return 0.35 if dxy_price > 104 else -0.20
 
 
-def score_direction(
-    direction: str,
-    regime: dict,
-    structural_bias: str,
-    conditions: dict,
-    dxy_data: dict | None
-) -> float:
-    """Weighted score for BUY or SELL path."""
+def score_direction(direction: str, regime: dict, structural_bias: str, conditions: dict, dxy_data: dict | None) -> float:
     score = 0.0
     direction_bias = "BUY_ONLY" if direction == "BUY" else "SELL_ONLY"
 
@@ -495,7 +436,6 @@ def score_direction(
 
 
 def score_to_probability(buy_score: float, sell_score: float) -> tuple[float, float]:
-    """Convert directional scores into probabilities via softmax."""
     buy_exp = math.exp(max(min(buy_score, 20), -20))
     sell_exp = math.exp(max(min(sell_score, 20), -20))
     denom = buy_exp + sell_exp
@@ -506,130 +446,30 @@ def score_to_probability(buy_score: float, sell_score: float) -> tuple[float, fl
 
 
 def count_core_conditions(conditions: dict) -> int:
-    """Count core conditions used in DB payload and gating."""
     keys = ("stochrsi", "macd", "keltner", "asian_range")
     return sum(1 for k in keys if conditions.get(k))
 
 
-def check_entry_conditions(df_m15: pd.DataFrame, bias: str, asian_range: dict | None) -> dict:
-    """
-    STEP 4 â€” Check 4 entry conditions on M15 data.
-    Need 3 of 4 to trigger.
-    Returns: {"count": int, "conditions": dict}
-    """
-    latest = df_m15.iloc[-1]
-    prev = df_m15.iloc[-2]
-    conditions = {}
-
-    # a) StochRSI crossover in extreme zone
-    k_now = latest.get("stochrsi_k", 50)
-    d_now = latest.get("stochrsi_d", 50)
-    k_prev = prev.get("stochrsi_k", 50)
-    d_prev = prev.get("stochrsi_d", 50)
-
-    if bias == "BUY_ONLY":
-        # %K crosses above %D in oversold zone (<20)
-        stochrsi_trigger = (k_prev < d_prev and k_now > d_now and k_now < 30)
-    else:
-        # %K crosses below %D in overbought zone (>80)
-        stochrsi_trigger = (k_prev > d_prev and k_now < d_now and k_now > 70)
-
-    conditions["stochrsi"] = bool(stochrsi_trigger)
-
-    # b) MACD histogram acceleration in bias direction
-    hist_now = latest.get("macd_histogram", 0)
-    hist_prev = prev.get("macd_histogram", 0)
-
-    if pd.isna(hist_now):
-        hist_now = 0
-    if pd.isna(hist_prev):
-        hist_prev = 0
-
-    if bias == "BUY_ONLY":
-        macd_trigger = (hist_now > hist_prev and hist_now > 0)
-    else:
-        macd_trigger = (hist_now < hist_prev and hist_now < 0)
-
-    conditions["macd"] = bool(macd_trigger)
-
-    # c) Price closed beyond Keltner Channel
-    kc_upper = latest.get("keltner_upper", None)
-    kc_lower = latest.get("keltner_lower", None)
-    close = latest["Close"]
-
-    if bias == "BUY_ONLY" and kc_upper is not None and not pd.isna(kc_upper):
-        keltner_trigger = close > kc_upper
-    elif bias == "SELL_ONLY" and kc_lower is not None and not pd.isna(kc_lower):
-        keltner_trigger = close < kc_lower
-    else:
-        keltner_trigger = False
-
-    conditions["keltner"] = bool(keltner_trigger)
-
-    # d) Asian Session Range breakout
-    if asian_range is not None:
-        if bias == "BUY_ONLY":
-            asian_trigger = close > asian_range["high"]
-        else:
-            asian_trigger = close < asian_range["low"]
-    else:
-        asian_trigger = False
-
-    conditions["asian_range"] = bool(asian_trigger)
-
-    count = sum(1 for v in conditions.values() if v)
-    return {"count": count, "conditions": conditions}
-
-
-def calculate_confidence(conditions_count: int, adx: float, dxy_data: dict | None, bias: str) -> int:
-    """STEP 5 (partial) â€” Confidence score calculation."""
-    confidence = 0
-
-    # Base from conditions count
-    if conditions_count == 3:
-        confidence = 75
-    elif conditions_count >= 4:
-        confidence = 90
-
-    # ADX strength bonus
-    if adx > 30:
-        confidence += 5
-    if adx > 40:
-        confidence += 5  # Total +10
-
-    # DXY confluence bonus (gold is inversely correlated with USD)
-    if dxy_data and dxy_data.get("price", 0) > 0:
-        # We'd need DXY direction â€” simplified: if we have a price, give partial credit
-        confidence += 3
-
-    return min(confidence, 100)
-
-
 def check_active_signal() -> dict | None:
-    """Check if there's already an active signal."""
     try:
-        resp = supabase.table("signals") \
-            .select("*") \
-            .eq("status", "ACTIVE") \
-            .order("created_at", desc=True) \
-            .limit(1) \
+        resp = (
+            supabase.table("signals")
+            .select("*")
+            .eq("status", "ACTIVE")
+            .order("created_at", desc=True)
+            .limit(1)
             .execute()
-
+        )
         if resp.data and len(resp.data) > 0:
             return resp.data[0]
     except Exception as e:
-        print(f"  âš ï¸  Error checking active signal: {e}")
+        print(f"  WARNING: Error checking active signal: {e}")
 
     return None
 
 
 def manage_active_signal(active_signal: dict, current_price: float):
-    """
-    STEP 6 â€” Check if active signal hit any TP or SL.
-    Updates signal status in Supabase.
-    """
     sig_type = active_signal["type"]
-    entry = float(active_signal["entry_price"])
     tp1 = float(active_signal["tp1"])
     tp2 = float(active_signal["tp2"])
     tp3 = float(active_signal["tp3"])
@@ -647,7 +487,7 @@ def manage_active_signal(active_signal: dict, current_price: float):
             new_status = "HIT_TP2"
         elif current_price >= tp1 and current_status not in ("HIT_TP1", "HIT_TP2", "HIT_TP3"):
             new_status = "HIT_TP1"
-    else:  # SELL
+    else:
         if current_price >= sl:
             new_status = "HIT_SL"
         elif current_price <= tp3:
@@ -657,25 +497,24 @@ def manage_active_signal(active_signal: dict, current_price: float):
         elif current_price <= tp1 and current_status not in ("HIT_TP1", "HIT_TP2", "HIT_TP3"):
             new_status = "HIT_TP1"
 
-    # Check expiration (signal older than 4 hours)
     created = datetime.fromisoformat(active_signal["created_at"].replace("Z", "+00:00"))
-    if datetime.now(timezone.utc) - created > timedelta(hours=4):
-        if new_status == "ACTIVE":
-            new_status = "EXPIRED"
+    if datetime.now(timezone.utc) - created > timedelta(hours=4) and new_status == "ACTIVE":
+        new_status = "EXPIRED"
 
     if new_status != current_status:
-        print(f"  ðŸ“Š Signal {active_signal['id'][:8]}... status: {current_status} â†’ {new_status}")
+        print(f"  Signal {active_signal['id'][:8]} status: {current_status} -> {new_status}")
         try:
-            supabase.table("signals") \
-                .update({"status": new_status}) \
-                .eq("id", active_signal["id"]) \
+            (
+                supabase.table("signals")
+                .update({"status": new_status})
+                .eq("id", active_signal["id"])
                 .execute()
+            )
         except Exception as e:
-            print(f"  âŒ Error updating signal status: {e}")
+            print(f"  ERROR updating signal status: {e}")
 
 
 def save_indicator_snapshot(df_m15: pd.DataFrame, df_h1: pd.DataFrame, dxy_data: dict | None):
-    """STEP 7 â€” Save current indicator values to Supabase."""
     m15_latest = df_m15.iloc[-1]
     h1_latest = df_h1.iloc[-1]
 
@@ -692,45 +531,40 @@ def save_indicator_snapshot(df_m15: pd.DataFrame, df_h1: pd.DataFrame, dxy_data:
         "dxy_direction": "FLAT",
     }
 
-    # Determine DXY direction from recent H1 bars
     if dxy_data and dxy_data.get("price", 0) > 0:
-        # Simple: compare to VWAP-like average
-        snapshot["dxy_direction"] = "UP" if dxy_data["price"] > 104 else "DOWN"  # Simplified
+        snapshot["dxy_direction"] = "UP" if dxy_data["price"] > 104 else "DOWN"
 
     try:
         supabase.table("indicator_snapshots").insert(snapshot).execute()
-        print("  ðŸ’¾ Indicator snapshot saved")
+        print("  Indicator snapshot saved")
     except Exception as e:
-        print(f"  âš ï¸  Error saving snapshot: {e}")
+        print(f"  WARNING: Error saving snapshot: {e}")
 
 
 def run_signal_engine():
-    """Main signal generation pipeline - runs once per invocation."""
     print(f"\n{'=' * 60}")
     print(f"Signal Engine - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print(f"{'=' * 60}")
 
     print("\nFetching M15 candles...")
-    df_m15 = fetch_candles("C:XAUUSD", 15, "minute", bars=140)
+    df_m15 = fetch_candles("XAU/USD", 15, "minute", bars=140)
     if df_m15 is None or len(df_m15) < 80:
         print("  ERROR: Insufficient M15 data. Aborting.")
         return
-
     print(f"  OK: Got {len(df_m15)} M15 bars")
 
     print("Fetching H1 candles...")
-    df_h1 = fetch_candles("C:XAUUSD", 1, "hour", bars=120)
+    df_h1 = fetch_candles("XAU/USD", 1, "hour", bars=120)
     if df_h1 is None or len(df_h1) < 60:
         print("  ERROR: Insufficient H1 data. Aborting.")
         return
-
     print(f"  OK: Got {len(df_h1)} H1 bars")
 
     dxy_data = fetch_dxy_quote()
     if dxy_data:
         print(f"DXY: {dxy_data['price']:.2f}")
     else:
-        print("DXY unavailable, continuing without confluence")
+        print("DXY unavailable, using neutral confluence")
 
     print("\nCalculating indicators...")
     df_m15 = calculate_m15_indicators(df_m15)
@@ -880,5 +714,3 @@ def run_signal_engine():
 
 if __name__ == "__main__":
     run_signal_engine()
-
-
