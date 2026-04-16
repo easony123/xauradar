@@ -1,17 +1,17 @@
 """
 Economic Calendar Scraper
 =========================
-Scrapes Forex Factory for high-impact USD events.
+Fetches Forex Factory weekly JSON feed for high-impact USD events.
 Stores results in Supabase `economic_events` table.
 Run daily via GitHub Actions (Mon-Fri).
 """
 
 import os
+from datetime import datetime, timedelta, timezone
+
 import requests
-from bs4 import BeautifulSoup
-from datetime import datetime, timezone, timedelta
-from supabase import create_client
 from dotenv import load_dotenv
+from supabase import create_client
 
 load_dotenv()
 
@@ -23,161 +23,118 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-FOREX_FACTORY_URL = "https://www.forexfactory.com/calendar"
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-}
+FOREX_FACTORY_JSON_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
 
-def scrape_forex_factory():
-    """
-    Scrape this week's high-impact USD events from Forex Factory.
-    Returns list of event dicts.
-    """
-    print("📅 Scraping Forex Factory calendar...")
+def normalize_impact(value: str | None) -> str:
+    text = (value or "").strip().upper()
+    if text in ("HIGH", "MEDIUM", "LOW"):
+        return text
+    if "HIGH" in text:
+        return "HIGH"
+    if "MEDIUM" in text:
+        return "MEDIUM"
+    if "LOW" in text:
+        return "LOW"
+    return "LOW"
+
+
+def parse_event_date(raw_date: str | None) -> str | None:
+    if not raw_date:
+        return None
+    text = raw_date.strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def fetch_forex_factory_events() -> list[dict]:
+    """Fetch this week's high-impact USD events from Forex Factory JSON feed."""
+    print("Fetching Forex Factory weekly feed...")
 
     try:
-        resp = requests.get(FOREX_FACTORY_URL, headers=HEADERS, timeout=30)
+        resp = requests.get(FOREX_FACTORY_JSON_URL, timeout=30)
         resp.raise_for_status()
     except Exception as e:
-        print(f"  ❌ Failed to fetch calendar: {e}")
+        print(f"  ERROR: Failed to fetch calendar feed: {e}")
         return []
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    events = []
+    try:
+        rows = resp.json()
+    except Exception as e:
+        print(f"  ERROR: Invalid JSON response: {e}")
+        return []
 
-    # Forex Factory calendar rows
-    rows = soup.select("tr.calendar__row")
-    current_date = None
+    events = []
 
     for row in rows:
         try:
-            # Date cell (only appears on first event of each day)
-            date_cell = row.select_one("td.calendar__date span")
-            if date_cell and date_cell.text.strip():
-                date_text = date_cell.text.strip()
-                try:
-                    # Parse date like "Mon Apr 14"
-                    year = datetime.now().year
-                    current_date = datetime.strptime(f"{date_text} {year}", "%a %b %d %Y")
-                except ValueError:
-                    pass
-
-            if current_date is None:
-                continue
-
-            # Currency
-            currency_cell = row.select_one("td.calendar__currency")
-            if not currency_cell:
-                continue
-            currency = currency_cell.text.strip()
-
-            # Only USD events
+            currency = (row.get("country") or "").strip().upper()
             if currency != "USD":
                 continue
 
-            # Impact
-            impact_cell = row.select_one("td.calendar__impact span")
-            if not impact_cell:
-                continue
-
-            impact_class = " ".join(impact_cell.get("class", []))
-            if "high" in impact_class.lower() or "red" in impact_class.lower():
-                impact = "HIGH"
-            elif "medium" in impact_class.lower() or "orange" in impact_class.lower():
-                impact = "MEDIUM"
-            else:
-                continue  # Skip low impact
-
-            # Only keep HIGH impact
+            impact = normalize_impact(row.get("impact"))
             if impact != "HIGH":
                 continue
 
-            # Time
-            time_cell = row.select_one("td.calendar__time")
-            event_time = time_cell.text.strip() if time_cell else ""
+            event_iso = parse_event_date(row.get("date"))
+            if not event_iso:
+                continue
 
-            # Parse time (e.g., "8:30am")
-            event_dt = current_date
-            if event_time and event_time not in ("", "All Day", "Tentative"):
-                try:
-                    parsed_time = datetime.strptime(event_time, "%I:%M%p")
-                    event_dt = current_date.replace(
-                        hour=parsed_time.hour,
-                        minute=parsed_time.minute
-                    )
-                    # Convert EST to UTC (+5 hours)
-                    event_dt = event_dt + timedelta(hours=5)
-                except ValueError:
-                    pass
+            events.append(
+                {
+                    "event_date": event_iso,
+                    "currency": "USD",
+                    "event_name": (row.get("title") or "Unknown").strip(),
+                    "impact": impact,
+                    "previous": row.get("previous") or None,
+                    "forecast": row.get("forecast") or None,
+                    "actual": row.get("actual") or None,
+                }
+            )
+        except Exception:
+            continue
 
-            # Event name
-            event_cell = row.select_one("td.calendar__event span")
-            event_name = event_cell.text.strip() if event_cell else "Unknown"
-
-            # Previous / Forecast / Actual
-            prev_cell = row.select_one("td.calendar__previous span")
-            forecast_cell = row.select_one("td.calendar__forecast span")
-            actual_cell = row.select_one("td.calendar__actual span")
-
-            events.append({
-                "event_date": event_dt.replace(tzinfo=timezone.utc).isoformat(),
-                "currency": "USD",
-                "event_name": event_name,
-                "impact": impact,
-                "previous": prev_cell.text.strip() if prev_cell else None,
-                "forecast": forecast_cell.text.strip() if forecast_cell else None,
-                "actual": actual_cell.text.strip() if actual_cell else None,
-            })
-
-        except Exception as e:
-            continue  # Skip malformed rows
-
-    print(f"  📊 Found {len(events)} high-impact USD events")
+    print(f"  Found {len(events)} high-impact USD events")
     return events
 
 
-def store_events(events: list):
+def store_events(events: list[dict]) -> None:
     """Upsert events into Supabase."""
     if not events:
-        print("  ℹ️  No events to store")
+        print("  INFO: No events to store")
         return
 
-    # Clear old events (older than 7 days)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     try:
-        supabase.table("economic_events") \
-            .delete() \
-            .lt("event_date", cutoff) \
-            .execute()
+        supabase.table("economic_events").delete().lt("event_date", cutoff).execute()
     except Exception:
         pass
 
-    # Insert new events
+    inserted = 0
     for event in events:
         try:
-            supabase.table("economic_events").upsert(
-                event,
-                on_conflict="event_date,event_name"
-            ).execute()
+            supabase.table("economic_events").upsert(event, on_conflict="event_date,event_name").execute()
+            inserted += 1
         except Exception as e:
-            print(f"  ⚠️  Error storing event '{event['event_name']}': {e}")
+            print(f"  WARN: Error storing event '{event['event_name']}': {e}")
 
-    print(f"  ✅ Stored {len(events)} events in Supabase")
+    print(f"  Stored {inserted} events in Supabase")
 
 
-def main():
+def main() -> None:
     print("=" * 50)
-    print(f"📅 Calendar Scraper — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"Calendar Scraper - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     print("=" * 50)
 
-    events = scrape_forex_factory()
+    events = fetch_forex_factory_events()
     store_events(events)
 
-    print("\n✅ Calendar scraper complete")
+    print("\nCalendar scraper complete")
 
 
 if __name__ == "__main__":

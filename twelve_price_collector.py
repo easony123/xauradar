@@ -56,6 +56,14 @@ def parse_provider_ts(value: Any) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def clamp_to_recent(provider_ts: datetime, max_age_minutes: int = 30) -> datetime:
+    now = datetime.now(timezone.utc)
+    age_minutes = abs((now - provider_ts).total_seconds()) / 60.0
+    if age_minutes > max_age_minutes:
+        return now
+    return provider_ts
+
+
 def twelve_get(path: str, params: dict[str, Any]) -> dict[str, Any] | None:
     request_params = {**params, "apikey": TWELVE_DATA_API_KEY}
     try:
@@ -81,18 +89,34 @@ def fetch_tick() -> dict[str, Any] | None:
         bid = parse_float(quote.get("bid"))
         ask = parse_float(quote.get("ask"))
         if price:
+            raw_ts = quote.get("timestamp")
+            if raw_ts is not None:
+                provider_ts = parse_provider_ts(raw_ts)
+            else:
+                raw_dt = quote.get("datetime")
+                # Some quote payloads provide date-only strings (YYYY-MM-DD).
+                # Treat them as "now" to keep freshness/latency UI accurate.
+                if isinstance(raw_dt, str) and len(raw_dt.strip()) == 10:
+                    provider_ts = datetime.now(timezone.utc)
+                else:
+                    provider_ts = parse_provider_ts(raw_dt)
+            provider_ts = clamp_to_recent(provider_ts)
             if bid is None:
                 bid = price
             if ask is None:
                 ask = price
             return {
-                "provider_ts": parse_provider_ts(quote.get("datetime") or quote.get("timestamp")),
+                "provider_ts": provider_ts,
                 "price": price,
                 "bid": bid,
                 "ask": ask,
                 "source": "TD_LIVE",
                 "is_delayed": False,
-                "meta": {"endpoint": "quote"},
+                "meta": {
+                    "endpoint": "quote",
+                    "quote_datetime": quote.get("datetime"),
+                    "quote_timestamp": quote.get("timestamp"),
+                },
             }
 
     # 2) Fallback to /price.
