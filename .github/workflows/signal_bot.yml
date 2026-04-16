@@ -2,8 +2,15 @@ name: XAUUSD Signal Bot
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # Every 5 minutes
+    - cron: '2-59/5 * * * *'  # Every 5 minutes, offset from top-of-hour load
   workflow_dispatch:  # Manual trigger
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xauusd-signal-bot
+  cancel-in-progress: true
 
 jobs:
   generate-signals:
@@ -22,6 +29,16 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Validate required secrets
+        env:
+          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          [ -n "$MASSIVE_API_KEY" ] || (echo "Missing secret: MASSIVE_API_KEY" && exit 1)
+          [ -n "$SUPABASE_URL" ] || (echo "Missing secret: SUPABASE_URL" && exit 1)
+          [ -n "$SUPABASE_KEY" ] || (echo "Missing secret: SUPABASE_KEY" && exit 1)
 
       - name: Run signal generator
         env:

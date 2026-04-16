@@ -29,7 +29,7 @@ async function boot() {
   pollSupabase();
 
   // Lighter polls
-  setInterval(pollPrice, 15000);       // Price every 15s
+  setInterval(pollPrice, 30000);       // Price every 30s (less API pressure)
   setInterval(pollSupabase, 30000);    // Supabase every 30s
   setInterval(pollDXY, 60000);         // DXY every 60s
 

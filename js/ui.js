@@ -5,6 +5,48 @@
 
 // ── Page Navigation ──────────────────────────────────────────
 
+const APP_TIMEZONE = 'Asia/Kuala_Lumpur';
+const APP_TZ_LABEL = 'MYT';
+const MY_FULL_TIME_FMT = new Intl.DateTimeFormat('en-MY', {
+  timeZone: APP_TIMEZONE,
+  year: 'numeric',
+  month: 'short',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+});
+const MY_SHORT_TIME_FMT = new Intl.DateTimeFormat('en-MY', {
+  timeZone: APP_TIMEZONE,
+  month: 'short',
+  day: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+});
+
+function formatMalaysiaTime(value, useShort = false) {
+  if (!value) return '';
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const fmt = useShort ? MY_SHORT_TIME_FMT : MY_FULL_TIME_FMT;
+  return `${fmt.format(date)} ${APP_TZ_LABEL}`;
+}
+
+function getTimePartsInTimezone(date, timezone) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: timezone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value || 0);
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value || 0);
+  const clock = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  return { hour, minute, clock };
+}
+
 function initNavigation() {
   const navItems = document.querySelectorAll('.nav-item');
   const pages = document.querySelectorAll('.page');
@@ -35,6 +77,7 @@ function updateSessionPill() {
   if (!el) return;
 
   const now = new Date();
+  const myt = getTimePartsInTimezone(now, APP_TIMEZONE);
   const utcH = now.getUTCHours();
   const utcM = now.getUTCMinutes();
   const total = utcH * 60 + utcM;
@@ -64,11 +107,11 @@ function updateSessionPill() {
     if (left < 0) left += 24 * 60;
     const h = Math.floor(left / 60);
     const m = left % 60;
-    el.textContent = `🟢 ${active.name} · ${h}h ${m}m left`;
+    el.textContent = `${myt.clock} ${APP_TZ_LABEL} · ${active.name} ${h}h ${m}m left`;
     el.style.background = `${active.color}22`;
     el.style.color = active.color;
   } else {
-    el.textContent = '⏳ Market Closed';
+    el.textContent = `${myt.clock} ${APP_TZ_LABEL} · Market Closed`;
     el.style.background = '';
     el.style.color = '';
   }
@@ -82,6 +125,7 @@ function updateHeaderPrice(priceData) {
   const priceEl = document.getElementById('header-price');
   const changeEl = document.getElementById('header-change');
   const statusEl = document.getElementById('connection-status');
+  const sourceEl = document.getElementById('source-badge');
 
   if (priceEl) {
     priceEl.textContent = `$${priceData.price.toFixed(2)}`;
@@ -91,13 +135,36 @@ function updateHeaderPrice(priceData) {
     setTimeout(() => priceEl.classList.remove('price-bounce'), 300);
   }
 
-  if (changeEl && priceData.spread !== undefined) {
-    changeEl.textContent = `Spread: ${priceData.spread.toFixed(2)}`;
+  if (changeEl) {
+    const ts = Number(priceData.timestamp) || Date.now();
+    const ageMin = Math.max(0, Math.floor((Date.now() - ts) / 60000));
+    const ageText = ageMin < 1 ? 'now' : ageMin < 60 ? `${ageMin}m ago` : `${Math.floor(ageMin / 60)}h ago`;
+
+    if (priceData.source === 'quote') {
+      changeEl.textContent = `Spread: ${priceData.spread.toFixed(2)} | Real-time`;
+    } else if (priceData.source === 'agg_1m') {
+      changeEl.textContent = `Source: 1m close | Delayed by data plan (${ageText})`;
+    } else {
+      changeEl.textContent = `Source: Prev close | Delayed by data plan (${ageText})`;
+    }
     changeEl.className = 'topbar__change';
   }
 
   if (statusEl) {
     statusEl.innerHTML = '<span class="status-dot"></span>';
+  }
+
+  if (sourceEl) {
+    const sourceMap = {
+      quote: { label: 'QUOTE', cls: 'source-badge--quote' },
+      agg_1m: { label: '1M', cls: 'source-badge--1m' },
+      agg_prev: { label: 'PREV', cls: 'source-badge--prev' },
+    };
+    const mapped = sourceMap[priceData.source] || { label: '--', cls: 'source-badge--unknown' };
+
+    sourceEl.textContent = `SRC: ${mapped.label}`;
+    sourceEl.className = `source-badge ${mapped.cls}`;
+    sourceEl.setAttribute('aria-label', `Price source: ${mapped.label}`);
   }
 }
 
@@ -118,7 +185,7 @@ function renderSignalHero(signal) {
   const type = signal.signal_type || signal.type || 'WAIT';
   const conf = signal.confidence || 0;
   const confClass = conf >= 70 ? 'conf-high' : conf >= 50 ? 'conf-med' : 'conf-low';
-  const time = signal.created_at ? new Date(signal.created_at).toLocaleString() : '';
+  const time = formatMalaysiaTime(signal.created_at);
   const regime = signal.h1_regime || ((signal.adx_value || 0) >= 20 ? 'Trending' : 'Range');
 
   hero.innerHTML = `
@@ -349,7 +416,7 @@ function renderHistory(signals) {
     const type = s.signal_type || s.type || 'WAIT';
     const entry = parseFloat(s.entry_price) || 0;
     const conf = s.confidence || 0;
-    const time = s.created_at ? new Date(s.created_at).toLocaleString() : '';
+    const time = formatMalaysiaTime(s.created_at);
     const status = (s.status || 'ACTIVE').replace('_', ' ');
 
     let statusCls = 'active';
@@ -389,7 +456,7 @@ function renderEvents(events) {
   }
 
   container.innerHTML = events.map((e) => {
-    const time = new Date(e.event_date).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const time = formatMalaysiaTime(e.event_date, true);
     return `
       <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)">
         <div>

@@ -1,11 +1,13 @@
 /**
  * api.js — Data layer
- * Handles Massive.com live price polling (15s) and Supabase data reads.
+ * Handles Massive.com/Polygon live price polling and Supabase data reads.
  */
 
 // ── Config ───────────────────────────────────────────────────
 const MASSIVE_API_KEY = '34FMvo_3DD6hL54apDwMKPXNk_aa86uv';
 const MASSIVE_BASE = 'https://api.polygon.io';
+const XAU_QUOTE_PATH = '/v1/last_quote/currencies/XAU/USD';
+const XAU_AGG_PREV_PATH = '/v2/aggs/ticker/C:XAUUSD/prev';
 
 // Supabase config
 const SUPABASE_URL = 'https://autbjwirftpixizrrzhw.supabase.co';
@@ -15,6 +17,54 @@ const SUPABASE_ANON_KEY = 'sb_publishable_A_gXMbmff2IFJbZX1wsKrA_sXz6jzkQ';
 let supabaseClient = null;
 let lastPrice = null;
 let priceDirection = null; // 'up' | 'down' | null
+let lastLiveSnapshot = null;
+let quoteEndpointDisabled = false;
+let backoffUntilTs = 0;
+let backoffMs = 0;
+
+const BACKOFF_BASE_MS = 30 * 1000;
+const BACKOFF_MAX_MS = 5 * 60 * 1000;
+
+function setRateLimitBackoff() {
+  backoffMs = backoffMs > 0 ? Math.min(backoffMs * 2, BACKOFF_MAX_MS) : BACKOFF_BASE_MS;
+  backoffUntilTs = Date.now() + backoffMs;
+  console.warn(`Rate-limited by API. Backing off for ${Math.round(backoffMs / 1000)}s.`);
+}
+
+function clearRateLimitBackoff() {
+  backoffMs = 0;
+  backoffUntilTs = 0;
+}
+
+function createHttpError(status, data, fallbackMessage = '') {
+  const apiMessage = (data && (data.message || data.error)) || fallbackMessage || `HTTP ${status}`;
+  const err = new Error(apiMessage);
+  err.status = status;
+  err.data = data || null;
+  return err;
+}
+
+async function fetchJson(url) {
+  const resp = await fetch(url);
+  const text = await resp.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+
+  if (!resp.ok) {
+    throw createHttpError(resp.status, data, `HTTP ${resp.status}`);
+  }
+
+  // Some APIs may return HTTP 200 with logical error payloads.
+  if (data && data.status === 'ERROR') {
+    throw createHttpError(resp.status, data, 'API status=ERROR');
+  }
+
+  return data;
+}
 
 function tryParseJson(value) {
   if (typeof value !== 'string') return value;
@@ -77,45 +127,140 @@ function initSupabase() {
  * Fetch latest XAUUSD mid-price from Massive.com forex quotes.
  * Returns: { price, bid, ask, direction, timestamp }
  */
+async function fetchLastQuotePrice() {
+  const url = `${MASSIVE_BASE}${XAU_QUOTE_PATH}?apiKey=${MASSIVE_API_KEY}`;
+  const data = await fetchJson(url);
+  const last = data && data.last ? data.last : null;
+  const bid = last && Number.isFinite(last.bid) ? last.bid : null;
+  const ask = last && Number.isFinite(last.ask) ? last.ask : null;
+
+  if (!bid || !ask || bid <= 0 || ask <= 0) {
+    const status = data && data.status ? data.status : 'UNKNOWN';
+    throw new Error(`Quote unavailable (${status})`);
+  }
+
+  return {
+    price: (bid + ask) / 2,
+    bid,
+    ask,
+    spread: ask - bid,
+    timestamp: last.timestamp || Date.now(),
+    source: 'quote',
+    isDelayed: false,
+    pair: data.symbol || 'XAU/USD',
+  };
+}
+
+async function fetchPrevAggregatePrice() {
+  const url = `${MASSIVE_BASE}${XAU_AGG_PREV_PATH}?adjusted=true&apiKey=${MASSIVE_API_KEY}`;
+  const data = await fetchJson(url);
+  if (!data.results || data.results.length === 0) {
+    throw new Error('No aggregate data');
+  }
+
+  const r = data.results[0];
+  const price = Number.isFinite(r.c) ? r.c : 0;
+  if (!price) throw new Error('Invalid aggregate price');
+
+  return {
+    price,
+    bid: price,
+    ask: price,
+    spread: 0,
+    timestamp: r.t || Date.now(),
+    source: 'agg_prev',
+    isDelayed: true,
+    pair: data.ticker || 'C:XAUUSD',
+  };
+}
+
+async function fetchMinuteAggregatePrice() {
+  const now = Date.now();
+  const from = now - 45 * 60 * 1000; // smaller request window to reduce load
+  const url = `${MASSIVE_BASE}/v2/aggs/ticker/C:XAUUSD/range/1/minute/${from}/${now}?adjusted=true&sort=asc&limit=45&apiKey=${MASSIVE_API_KEY}`;
+  const data = await fetchJson(url);
+  if (!data.results || data.results.length === 0) {
+    throw new Error('No minute aggregate data');
+  }
+
+  const r = data.results[data.results.length - 1];
+  const price = Number.isFinite(r.c) ? r.c : 0;
+  if (!price) throw new Error('Invalid minute aggregate price');
+
+  return {
+    price,
+    bid: price,
+    ask: price,
+    spread: 0,
+    timestamp: r.t || Date.now(),
+    source: 'agg_1m',
+    isDelayed: true,
+    pair: data.ticker || 'C:XAUUSD',
+  };
+}
+
 async function fetchLivePrice() {
   try {
-    const url = `${MASSIVE_BASE}/v2/aggs/ticker/C:XAUUSD/prev?adjusted=true&apiKey=${MASSIVE_API_KEY}`;
-    const resp = await fetch(url);
-
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
-
-    let price = 0;
-
-    if (data.results && data.results.length > 0) {
-      const r = data.results[0];
-      price = r.c || 0;
+    if (Date.now() < backoffUntilTs) {
+      return lastLiveSnapshot;
     }
 
-    if (price === 0) {
-      return null;
+    let live = null;
+
+    if (!quoteEndpointDisabled) {
+      try {
+        live = await fetchLastQuotePrice();
+      } catch (quoteErr) {
+        if (quoteErr.status === 403) {
+          quoteEndpointDisabled = true;
+          console.warn('Quote endpoint not authorized for current plan. Switching to aggregate-only mode.');
+        } else if (quoteErr.status === 429) {
+          setRateLimitBackoff();
+          return lastLiveSnapshot;
+        }
+      }
     }
 
-    let bid = price;
-    let ask = price;
+    if (!live) {
+      try {
+        live = await fetchMinuteAggregatePrice();
+      } catch (minuteErr) {
+        if (minuteErr.status === 429) {
+          setRateLimitBackoff();
+          return lastLiveSnapshot;
+        }
+        live = await fetchPrevAggregatePrice();
+      }
+    }
+
+    if (!live || !live.price) return null;
+    clearRateLimitBackoff();
 
     // Determine direction
     if (lastPrice !== null) {
-      priceDirection = price > lastPrice ? 'up' : price < lastPrice ? 'down' : priceDirection;
+      priceDirection = live.price > lastPrice ? 'up' : live.price < lastPrice ? 'down' : priceDirection;
     }
-    lastPrice = price;
+    lastPrice = live.price;
 
-    return {
-      price,
-      bid,
-      ask,
+    const snapshot = {
+      price: live.price,
+      bid: live.bid,
+      ask: live.ask,
       direction: priceDirection,
-      spread: ask - bid,
-      timestamp: Date.now(),
+      spread: live.spread,
+      timestamp: live.timestamp,
+      source: live.source,
+      isDelayed: live.isDelayed,
+      pair: live.pair,
     };
+    lastLiveSnapshot = snapshot;
+    return snapshot;
   } catch (err) {
+    if (err && err.status === 429) {
+      setRateLimitBackoff();
+    }
     console.error('Price fetch error:', err.message);
-    return null;
+    return lastLiveSnapshot;
   }
 }
 
