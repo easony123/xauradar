@@ -1,12 +1,11 @@
 /**
- * ui.js — DOM rendering for the MooMoo-style multi-page dashboard.
- * Handles page switching, signal rendering, indicators, history, stats, etc.
+ * ui.js - DOM rendering for XAU Radar dashboard.
  */
-
-// ── Page Navigation ──────────────────────────────────────────
 
 const APP_TIMEZONE = 'Asia/Kuala_Lumpur';
 const APP_TZ_LABEL = 'MYT';
+const THEME_KEY = 'xauradar_theme';
+
 const MY_FULL_TIME_FMT = new Intl.DateTimeFormat('en-MY', {
   timeZone: APP_TIMEZONE,
   year: 'numeric',
@@ -16,6 +15,7 @@ const MY_FULL_TIME_FMT = new Intl.DateTimeFormat('en-MY', {
   minute: '2-digit',
   hour12: false,
 });
+
 const MY_SHORT_TIME_FMT = new Intl.DateTimeFormat('en-MY', {
   timeZone: APP_TIMEZONE,
   month: 'short',
@@ -47,30 +47,145 @@ function getTimePartsInTimezone(date, timezone) {
   return { hour, minute, clock };
 }
 
-function initNavigation() {
-  const navItems = document.querySelectorAll('.nav-item');
-  const pages = document.querySelectorAll('.page');
+function setTheme(theme) {
+  const root = document.documentElement;
+  root.setAttribute('data-theme', theme === 'light' ? 'light' : 'dark');
 
-  navItems.forEach((item) => {
-    item.addEventListener('click', () => {
-      const target = item.dataset.page;
+  const toggle = document.getElementById('theme-toggle');
+  if (toggle) {
+    toggle.textContent = theme === 'light' ? 'Light' : 'Dark';
+    toggle.setAttribute('aria-label', `Theme: ${theme}`);
+  }
 
-      navItems.forEach((n) => n.classList.remove('active'));
-      item.classList.add('active');
+  if (window.Chart && window.Chart.isInitialized && window.Chart.isInitialized() && window.Chart.applyTheme) {
+    window.Chart.applyTheme(theme);
+  }
+}
 
-      pages.forEach((p) => p.classList.remove('active'));
-      const page = document.getElementById(`page-${target}`);
-      if (page) page.classList.add('active');
+function initTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+  const initial = saved || (prefersLight ? 'light' : 'dark');
+  setTheme(initial);
 
-      // Lazy init chart when switching to chart tab
-      if (target === 'chart' && window.Chart && !window.Chart.isInitialized()) {
-        window.Chart.init();
-      }
+  const toggle = document.getElementById('theme-toggle');
+  if (toggle) {
+    toggle.addEventListener('click', () => {
+      const current = document.documentElement.getAttribute('data-theme') || 'dark';
+      const next = current === 'dark' ? 'light' : 'dark';
+      localStorage.setItem(THEME_KEY, next);
+      setTheme(next);
     });
+  }
+}
+
+function setActivePage(target) {
+  const pages = document.querySelectorAll('.page');
+  pages.forEach((p) => p.classList.remove('active'));
+  const page = document.getElementById(`page-${target}`);
+  if (page) page.classList.add('active');
+
+  document.querySelectorAll('.nav-item').forEach((node) => {
+    const isActive = node.dataset.page === target;
+    node.classList.toggle('active', isActive);
+  });
+
+  if (target === 'chart' && window.Chart && !window.Chart.isInitialized()) {
+    window.Chart.init();
+  }
+}
+
+function initNavigation() {
+  document.querySelectorAll('.nav-item').forEach((item) => {
+    item.addEventListener('click', () => setActivePage(item.dataset.page));
   });
 }
 
-// ── Session Clock ────────────────────────────────────────────
+function setAuthButtonUser(email) {
+  const btn = document.getElementById('auth-open-btn');
+  if (!btn) return;
+
+  if (email) {
+    const short = email.length > 16 ? `${email.slice(0, 13)}...` : email;
+    btn.textContent = short;
+    btn.classList.add('auth-trigger--active');
+    btn.setAttribute('title', email);
+    btn.setAttribute('aria-label', `Signed in as ${email}`);
+  } else {
+    btn.textContent = 'Sign up';
+    btn.classList.remove('auth-trigger--active');
+    btn.setAttribute('title', 'Open sign up');
+    btn.setAttribute('aria-label', 'Open sign up');
+  }
+}
+
+function initAuthModal(onSignup) {
+  const modal = document.getElementById('auth-modal');
+  const openBtn = document.getElementById('auth-open-btn');
+  const closeBtn = document.getElementById('auth-close-btn');
+  const backdrop = document.getElementById('auth-modal-backdrop');
+  const form = document.getElementById('auth-signup-form');
+  const submitBtn = document.getElementById('auth-submit-btn');
+  const feedback = document.getElementById('auth-feedback');
+  const emailInput = document.getElementById('auth-email');
+  const passwordInput = document.getElementById('auth-password');
+
+  if (!modal || !openBtn || !closeBtn || !backdrop || !form || !submitBtn || !feedback || !emailInput || !passwordInput) {
+    return;
+  }
+
+  const open = () => {
+    modal.classList.add('is-open');
+    modal.setAttribute('aria-hidden', 'false');
+    feedback.textContent = '';
+    setTimeout(() => emailInput.focus(), 20);
+  };
+
+  const close = () => {
+    modal.classList.remove('is-open');
+    modal.setAttribute('aria-hidden', 'true');
+  };
+
+  openBtn.addEventListener('click', open);
+  closeBtn.addEventListener('click', close);
+  backdrop.addEventListener('click', close);
+  document.addEventListener('keydown', (evt) => {
+    if (evt.key === 'Escape' && modal.classList.contains('is-open')) close();
+  });
+
+  form.addEventListener('submit', async (evt) => {
+    evt.preventDefault();
+    const email = emailInput.value.trim();
+    const password = passwordInput.value;
+    if (!email || password.length < 8) {
+      feedback.textContent = 'Use a valid email and password (minimum 8 chars).';
+      feedback.className = 'auth-feedback auth-feedback--error';
+      return;
+    }
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Creating...';
+    feedback.textContent = '';
+
+    try {
+      const result = await onSignup(email, password);
+      if (result?.session?.user?.email) {
+        setAuthButtonUser(result.session.user.email);
+        feedback.textContent = 'Account created and signed in.';
+      } else {
+        feedback.textContent = 'Account created. If email confirmation is still enabled in Supabase, disable it in Auth settings.';
+      }
+      feedback.className = 'auth-feedback auth-feedback--ok';
+      form.reset();
+    } catch (err) {
+      feedback.textContent = err?.message || 'Sign up failed.';
+      feedback.className = 'auth-feedback auth-feedback--error';
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Sign up';
+    }
+  });
+}
 
 function updateSessionPill() {
   const el = document.getElementById('session-pill');
@@ -82,42 +197,49 @@ function updateSessionPill() {
   const utcM = now.getUTCMinutes();
   const total = utcH * 60 + utcM;
 
-  // Sessions in UTC
   const sessions = [
-    { name: 'Sydney', start: 21 * 60, end: 30 * 60, color: '#58a6ff' },     // 21:00-06:00
-    { name: 'Tokyo', start: 0, end: 9 * 60, color: '#bc8cff' },             // 00:00-09:00
-    { name: 'London', start: 7 * 60, end: 16 * 60, color: '#3fb950' },      // 07:00-16:00
-    { name: 'New York', start: 12 * 60, end: 21 * 60, color: '#f85149' },   // 12:00-21:00
+    { name: 'Sydney', start: 21 * 60, end: 30 * 60, color: '#4f8cff' },
+    { name: 'Tokyo', start: 0, end: 9 * 60, color: '#8b6eff' },
+    { name: 'London', start: 7 * 60, end: 16 * 60, color: '#1fca77' },
+    { name: 'New York', start: 12 * 60, end: 21 * 60, color: '#ef5d6c' },
   ];
 
   let active = null;
   for (const s of sessions) {
-    const normStart = s.start % (24 * 60);
-    const normEnd = s.end % (24 * 60);
-    if (normStart < normEnd) {
-      if (total >= normStart && total < normEnd) { active = s; break; }
-    } else {
-      if (total >= normStart || total < normEnd) { active = s; break; }
+    const start = s.start % (24 * 60);
+    const end = s.end % (24 * 60);
+    const inside = start < end ? total >= start && total < end : total >= start || total < end;
+    if (inside) {
+      active = s;
+      break;
     }
   }
 
+  let text = `${myt.clock} ${APP_TZ_LABEL} | Market Closed`;
   if (active) {
-    const endM = active.end % (24 * 60);
-    let left = endM - total;
+    const end = active.end % (24 * 60);
+    let left = end - total;
     if (left < 0) left += 24 * 60;
     const h = Math.floor(left / 60);
     const m = left % 60;
-    el.textContent = `${myt.clock} ${APP_TZ_LABEL} · ${active.name} ${h}h ${m}m left`;
-    el.style.background = `${active.color}22`;
+    text = `${myt.clock} ${APP_TZ_LABEL} | ${active.name} ${h}h ${m}m left`;
+    el.style.background = `${active.color}20`;
+    el.style.borderColor = `${active.color}55`;
     el.style.color = active.color;
   } else {
-    el.textContent = `${myt.clock} ${APP_TZ_LABEL} · Market Closed`;
     el.style.background = '';
+    el.style.borderColor = '';
     el.style.color = '';
   }
-}
 
-// ── Header Price ─────────────────────────────────────────────
+  el.textContent = text;
+
+  const sideSession = document.getElementById('sidebar-session');
+  if (sideSession) sideSession.textContent = active ? active.name : 'Closed';
+
+  const pulseSession = document.getElementById('pulse-session-value');
+  if (pulseSession) pulseSession.textContent = active ? `${active.name} Open` : 'Closed';
+}
 
 function updateHeaderPrice(priceData) {
   if (!priceData || !priceData.price) return;
@@ -130,27 +252,33 @@ function updateHeaderPrice(priceData) {
   if (priceEl) {
     priceEl.textContent = `$${priceData.price.toFixed(2)}`;
     priceEl.className = 'topbar__price';
-    if (priceData.direction) priceEl.classList.add(priceData.direction);
+    if (priceData.direction === 'up' || priceData.direction === 'down') {
+      priceEl.classList.add(priceData.direction);
+    } else {
+      priceEl.classList.add('neutral');
+    }
     priceEl.classList.add('price-bounce');
     setTimeout(() => priceEl.classList.remove('price-bounce'), 300);
   }
 
-  if (changeEl) {
-    const ts = Number(priceData.timestamp) || Date.now();
-    const ageMin = Math.max(0, Math.floor((Date.now() - ts) / 60000));
-    const ageText = ageMin < 1 ? 'now' : ageMin < 60 ? `${ageMin}m ago` : `${Math.floor(ageMin / 60)}h ago`;
-    const source = (priceData.source || '').toUpperCase();
+  const ts = Number(priceData.timestamp) || Date.now();
+  const ageMin = Number.isFinite(priceData.ageMinutes)
+    ? Math.max(0, Math.floor(priceData.ageMinutes))
+    : Math.max(0, Math.floor((Date.now() - ts) / 60000));
+  const ageText = ageMin < 1 ? 'now' : ageMin < 60 ? `${ageMin}m ago` : `${Math.floor(ageMin / 60)}h ago`;
+  const source = (priceData.source || '').toUpperCase();
 
+  if (changeEl) {
+    const spread = Number.isFinite(priceData.spread) ? priceData.spread.toFixed(2) : '--';
     if (source === 'TD_LIVE') {
-      changeEl.textContent = `Spread: ${priceData.spread.toFixed(2)} | Twelve Data live`;
+      changeEl.textContent = `Last tick: ${ageText} | Source: Twelve Data live | Spread: ${spread}`;
     } else if (source === 'TD_DELAYED') {
-      changeEl.textContent = `Source: Twelve Data delayed (${ageText})`;
+      changeEl.textContent = `Last tick: ${ageText} | Source: delayed plan`;
     } else if (source === 'STALE') {
-      changeEl.textContent = `Source: stale cache (${ageText})`;
+      changeEl.textContent = `Last tick: ${ageText} | Source: stale cache`;
     } else {
-      changeEl.textContent = `Source: unknown (${ageText})`;
+      changeEl.textContent = `Last tick: ${ageText} | Source: unknown`;
     }
-    changeEl.className = 'topbar__change';
   }
 
   if (statusEl) {
@@ -159,19 +287,21 @@ function updateHeaderPrice(priceData) {
 
   if (sourceEl) {
     const sourceMap = {
-      TD_LIVE: { label: 'LIVE', announce: 'TD_LIVE', cls: 'source-badge--quote' },
-      TD_DELAYED: { label: 'DELAY', announce: 'TD_DELAYED', cls: 'source-badge--1m' },
-      STALE: { label: 'STALE', announce: 'STALE', cls: 'source-badge--prev' },
+      TD_LIVE: { label: 'LIVE', cls: 'source-badge--quote' },
+      TD_DELAYED: { label: 'DELAY', cls: 'source-badge--1m' },
+      STALE: { label: 'STALE', cls: 'source-badge--prev' },
     };
-    const mapped = sourceMap[(priceData.source || '').toUpperCase()] || { label: '--', cls: 'source-badge--unknown' };
-
+    const mapped = sourceMap[source] || { label: '--', cls: 'source-badge--unknown' };
     sourceEl.textContent = `SRC: ${mapped.label}`;
     sourceEl.className = `source-badge ${mapped.cls}`;
-    sourceEl.setAttribute('aria-label', `Price source: ${mapped.announce || mapped.label}`);
+    sourceEl.setAttribute('aria-label', `Price source: ${mapped.label}`);
+
+    const sideSource = document.getElementById('sidebar-source');
+    if (sideSource) sideSource.textContent = mapped.label;
+    const pulseSource = document.getElementById('pulse-source-value');
+    if (pulseSource) pulseSource.textContent = mapped.label;
   }
 }
-
-// ── Signal Hero ──────────────────────────────────────────────
 
 function renderSignalHero(signal) {
   const hero = document.getElementById('signal-hero');
@@ -179,8 +309,8 @@ function renderSignalHero(signal) {
 
   if (!signal) {
     hero.innerHTML = `
-      <div class="signal-hero__badge waiting">📡 Waiting for signal setup...</div>
-      <div class="signal-hero__time">Bot checks every 5 minutes</div>
+      <div class="signal-hero__badge waiting">Waiting for signal setup...</div>
+      <div class="signal-hero__time">Price refresh: 3m | Signal bot: 5m</div>
     `;
     return;
   }
@@ -192,13 +322,11 @@ function renderSignalHero(signal) {
   const regime = signal.h1_regime || ((signal.adx_value || 0) >= 20 ? 'Trending' : 'Range');
 
   hero.innerHTML = `
-    <div class="signal-hero__badge ${type.toLowerCase()}">${type === 'BUY' ? '🟢' : '🔴'} ${type}</div>
-    <div class="signal-hero__conf">Confidence: <strong class="${confClass}">${conf}%</strong> · Regime: ${regime}</div>
+    <div class="signal-hero__badge ${type.toLowerCase()}">${type}</div>
+    <div class="signal-hero__conf">Confidence: <strong class="${confClass}">${conf}%</strong> | Regime: ${regime}</div>
     <div class="signal-hero__time">${time}</div>
   `;
 }
-
-// ── Levels ───────────────────────────────────────────────────
 
 function renderLevels(signal, currentPrice) {
   const container = document.getElementById('levels-row');
@@ -214,8 +342,7 @@ function renderLevels(signal, currentPrice) {
 
   const dist = (target) => {
     if (!target || !price) return '';
-    const pips = Math.abs(target - price).toFixed(1);
-    return `${pips}p`;
+    return `${Math.abs(target - price).toFixed(1)}p`;
   };
 
   const hitCheck = (target, isTp) => {
@@ -253,127 +380,136 @@ function renderLevels(signal, currentPrice) {
   `;
 }
 
-// ── Conditions ───────────────────────────────────────────────
-
 function renderConditions(signal, snapshot) {
   const container = document.getElementById('conditions-row');
   if (!container) return;
+
+  const renderRow = (label, items, tone = 'neutral') => `
+    <div class="conditions-block conditions-block--${tone}">
+      <div class="conditions-block__label">${label}</div>
+      <div class="conditions-block__chips">
+        ${items.map((item) => `<span class="cond-chip ${item.met ? 'met' : 'missed'}">${item.label}</span>`).join('')}
+      </div>
+    </div>
+  `;
 
   const signalConditions = signal && signal.conditions_met && typeof signal.conditions_met === 'object'
     ? signal.conditions_met
     : null;
 
-  if (signalConditions) {
-    const orderedConditions = [
-      { key: 'stochrsi', label: 'stochrsi' },
-      { key: 'macd', label: 'macd' },
-      { key: 'keltner', label: 'keltner' },
-      { key: 'asian_range', label: 'asian range' },
+  const buildSignalItems = (conditions) => {
+    const hasNewShape = (
+      Object.prototype.hasOwnProperty.call(conditions, 'trend_filter')
+      || Object.prototype.hasOwnProperty.call(conditions, 'macd_momentum')
+      || Object.prototype.hasOwnProperty.call(conditions, 'volatility_quality')
+    );
+
+    const ordered = hasNewShape
+      ? [
+        { key: 'trend_filter', label: 'trend filter' },
+        { key: 'pullback', label: 'pullback' },
+        { key: 'macd_momentum', label: 'macd momentum' },
+        { key: 'asian_range', label: 'asian range' },
+        { key: 'volatility_quality', label: 'volatility+spread' },
+      ]
+      : [
+        { key: 'stochrsi', label: 'stochrsi cross' },
+        { key: 'pullback', label: 'pullback' },
+        { key: 'macd', label: 'macd momentum' },
+        { key: 'asian_range', label: 'asian range' },
+        { key: 'keltner', label: 'keltner breakout' },
+      ];
+
+    return ordered.map((item) => {
+      const met = Boolean(conditions[item.key]);
+      return { label: item.label, met };
+    });
+  };
+
+  const emptyItems = [
+    { label: 'trend filter', met: false },
+    { label: 'pullback', met: false },
+    { label: 'macd momentum', met: false },
+    { label: 'asian range', met: false },
+    { label: 'volatility+spread', met: false },
+  ];
+
+  const buildPreviewItems = (side) => {
+    if (!snapshot) return emptyItems;
+
+    // Snapshot preview is directional guidance, not the final signal engine result.
+    const adx = Number(snapshot.adx_value ?? snapshot.adx ?? 0);
+    const stochK = Number(snapshot.stochrsi_k ?? 0);
+    const stochD = Number(snapshot.stochrsi_d ?? 0);
+    const macd = Number(snapshot.macd_value ?? snapshot.macd_histogram ?? 0);
+    const atr = Number(snapshot.atr_value ?? snapshot.atr ?? 0);
+
+    const isBuy = side === 'BUY';
+    return [
+      { met: adx >= 18, label: 'trend filter' },
+      { met: isBuy ? (stochK > stochD && stochK >= 20 && stochK <= 80) : (stochK < stochD && stochK >= 20 && stochK <= 80), label: 'pullback' },
+      { met: isBuy ? macd >= 0.2 : macd <= -0.2, label: 'macd momentum' },
+      { met: false, label: 'asian range' },
+      { met: atr > 0, label: 'volatility+spread' },
     ];
+  };
 
-    container.innerHTML = orderedConditions.map((condition) => {
-      const met = Boolean(signalConditions[condition.key]);
-      return `<span class="cond-chip ${met ? 'met' : 'missed'}">${met ? '✓' : '✗'} ${condition.label}</span>`;
-    }).join('');
-    return;
+  let buyItems = buildPreviewItems('BUY');
+  let sellItems = buildPreviewItems('SELL');
+
+  if (signalConditions) {
+    const signalType = signal.signal_type || signal.type || '';
+    const signalItems = buildSignalItems(signalConditions);
+    if (signalType === 'BUY') {
+      buyItems = signalItems;
+    } else if (signalType === 'SELL') {
+      sellItems = signalItems;
+    }
   }
 
-  if (!snapshot) {
-    container.innerHTML = `
-      <span class="cond-chip missed">— stochrsi</span>
-      <span class="cond-chip missed">— macd</span>
-      <span class="cond-chip missed">— keltner</span>
-      <span class="cond-chip missed">— asian range</span>
-    `;
-    return;
-  }
-
-  const conds = [
-    { name: 'stochrsi', met: snapshot.stochrsi_k < 20 || snapshot.stochrsi_k > 80 },
-    { name: 'macd', met: (snapshot.macd_value || 0) !== 0 },
-    { name: 'keltner', met: (snapshot.keltner_upper || 0) > 0 && (snapshot.keltner_lower || 0) > 0 },
-    { name: 'asian range', met: false },
-  ];
-
-  container.innerHTML = conds.map((c) =>
-    `<span class="cond-chip ${c.met ? 'met' : 'missed'}">${c.met ? '✓' : '✗'} ${c.name}</span>`
-  ).join('');
+  container.innerHTML = `
+    ${renderRow('BUY setup', buyItems, 'buy')}
+    ${renderRow('SELL setup', sellItems, 'sell')}
+  `;
 }
-
-// ── Indicators ───────────────────────────────────────────────
-
-function renderIndicators(snapshot) {
-  const grid = document.getElementById('indicators-grid');
-  if (!grid) return;
-
-  if (!snapshot) return;
-
-  const items = [
-    {
-      name: 'ADX',
-      val: (snapshot.adx_value || 0).toFixed(1),
-      tag: (snapshot.adx_value || 0) >= 25 ? 'Strong' : (snapshot.adx_value || 0) >= 20 ? 'Weak' : 'Range',
-      cls: (snapshot.adx_value || 0) >= 20 ? 'bullish' : 'neutral',
-    },
-    {
-      name: 'StochRSI',
-      val: (snapshot.stochrsi_k || 0).toFixed(1),
-      tag: (snapshot.stochrsi_k || 0) > 80 ? 'Overbought' : (snapshot.stochrsi_k || 0) < 20 ? 'Oversold' : 'Neutral',
-      cls: (snapshot.stochrsi_k || 0) < 20 ? 'bullish' : (snapshot.stochrsi_k || 0) > 80 ? 'bearish' : 'neutral',
-    },
-    {
-      name: 'MACD',
-      val: (snapshot.macd_value || 0).toFixed(2),
-      tag: (snapshot.macd_value || 0) > 0 ? 'Bullish' : 'Bearish',
-      cls: (snapshot.macd_value || 0) > 0 ? 'bullish' : 'bearish',
-    },
-    {
-      name: 'ATR',
-      val: (snapshot.atr_value || 0).toFixed(2),
-      tag: (snapshot.atr_value || 0) > 15 ? 'High Vol' : 'Normal',
-      cls: (snapshot.atr_value || 0) > 15 ? 'bearish' : 'neutral',
-    },
-  ];
-
-  grid.innerHTML = items.map((i) => `
-    <div class="indi-card">
-      <div class="indi-card__name">${i.name}</div>
-      <div class="indi-card__val">${i.val}</div>
-      <div class="indi-card__tag ${i.cls}">${i.tag}</div>
-    </div>
-  `).join('');
-}
-
-// ── DXY Widget ───────────────────────────────────────────────
 
 function renderDXY(dxyData) {
   const widget = document.getElementById('dxy-widget');
-  if (!widget || !dxyData) return;
+  if (!widget) return;
 
   const priceEl = widget.querySelector('.dxy-row__price');
   const corrEl = widget.querySelector('.dxy-row__corr');
-  if (priceEl) priceEl.textContent = dxyData.price ? dxyData.price.toFixed(2) : '—';
+
+  if (!dxyData || !dxyData.price) {
+    if (priceEl) priceEl.textContent = 'Unavailable';
+    if (corrEl) {
+      corrEl.textContent = 'Neutral (no DXY feed)';
+      corrEl.className = 'dxy-row__corr neutral';
+    }
+    const pulseDxy = document.getElementById('pulse-dxy-value');
+    if (pulseDxy) pulseDxy.textContent = 'Unavailable';
+    return;
+  }
+
+  if (priceEl) priceEl.textContent = dxyData.price ? dxyData.price.toFixed(2) : '--';
 
   if (corrEl && dxyData.direction) {
     const xauDir = window._lastPriceDirection;
-    // Gold and DXY are typically inversely correlated
     if (dxyData.direction === 'DOWN' && xauDir === 'up') {
-      corrEl.textContent = '🟢 Confirms LONG';
+      corrEl.textContent = 'Confirms long';
       corrEl.className = 'dxy-row__corr confirms';
     } else if (dxyData.direction === 'UP' && xauDir === 'down') {
-      corrEl.textContent = '🟢 Confirms SHORT';
+      corrEl.textContent = 'Confirms short';
       corrEl.className = 'dxy-row__corr confirms';
-    } else if (dxyData.direction === 'UP' && xauDir === 'up') {
-      corrEl.textContent = '⚠️ Diverging';
-      corrEl.className = 'dxy-row__corr diverges';
     } else {
-      corrEl.textContent = '⚠️ Diverging';
+      corrEl.textContent = 'Diverging';
       corrEl.className = 'dxy-row__corr diverges';
     }
   }
-}
 
-// ── News Banner ──────────────────────────────────────────────
+  const pulseDxy = document.getElementById('pulse-dxy-value');
+  if (pulseDxy) pulseDxy.textContent = dxyData.price ? dxyData.price.toFixed(2) : '--';
+}
 
 function renderNewsBanner(events) {
   const banner = document.getElementById('news-banner');
@@ -384,21 +520,27 @@ function renderNewsBanner(events) {
     return;
   }
 
-  const next = events[0];
+  const nextHighUsd = events.find((e) => (e.currency || '').toUpperCase() === 'USD' && (e.impact || '').toUpperCase() === 'HIGH');
+  if (!nextHighUsd) {
+    banner.classList.remove('visible');
+    return;
+  }
+
+  const next = nextHighUsd;
   const time = new Date(next.event_date);
-  const diff = time - Date.now();
+  const diff = time.getTime() - Date.now();
   const mins = Math.floor(diff / 60000);
 
   if (mins > 0 && mins <= 120) {
     banner.classList.add('visible');
-    banner.querySelector('.news-banner__text').textContent = `${next.event_name} (${next.impact})`;
-    banner.querySelector('.news-banner__time').textContent = mins <= 60 ? `${mins}m` : `${Math.floor(mins/60)}h ${mins%60}m`;
+    const textEl = banner.querySelector('.news-banner__text');
+    const timeEl = banner.querySelector('.news-banner__time');
+    if (textEl) textEl.textContent = `${next.event_name} (${next.impact})`;
+    if (timeEl) timeEl.textContent = mins <= 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
   } else {
     banner.classList.remove('visible');
   }
 }
-
-// ── History List ─────────────────────────────────────────────
 
 function renderHistory(signals) {
   const container = document.getElementById('history-list');
@@ -407,9 +549,8 @@ function renderHistory(signals) {
   if (!signals || signals.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
-        <div class="empty-state__icon">📜</div>
         <div class="empty-state__title">No signals yet</div>
-        <div class="empty-state__sub">Signals will appear here as they're generated</div>
+        <div class="empty-state__sub">Signals will appear here when generated</div>
       </div>
     `;
     return;
@@ -443,16 +584,14 @@ function renderHistory(signals) {
   }).join('');
 }
 
-// ── Events List ──────────────────────────────────────────────
-
 function renderEvents(events) {
   const container = document.getElementById('events-list');
   if (!container) return;
 
   if (!events || events.length === 0) {
     container.innerHTML = `
-      <div class="empty-state" style="padding:24px">
-        <div class="empty-state__sub">No upcoming high-impact events</div>
+      <div class="empty-state" style="padding:24px;">
+        <div class="empty-state__sub">No upcoming events in the next 7 days</div>
       </div>
     `;
     return;
@@ -460,19 +599,21 @@ function renderEvents(events) {
 
   container.innerHTML = events.map((e) => {
     const time = formatMalaysiaTime(e.event_date, true);
+    const impact = (e.impact || '--').toUpperCase();
+    const currency = (e.currency || '--').toUpperCase();
     return `
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)">
-        <div>
-          <div style="font-size:13px;font-weight:500;color:var(--text-primary)">${e.event_name}</div>
-          <div style="font-size:11px;color:var(--text-tertiary)">${time}</div>
+      <div class="history-item">
+        <div class="history-item__info">
+          <div class="history-item__entry">${e.event_name}</div>
+          <div class="history-item__meta">${time} | ${currency}</div>
         </div>
-        <span style="font-size:11px;font-weight:600;color:var(--red);background:var(--red-dim);padding:2px 8px;border-radius:100px">${e.impact}</span>
+        <div class="history-item__right">
+          <div class="history-item__status ${impact === 'HIGH' ? 'hit-sl' : impact === 'MEDIUM' ? 'active' : 'expired'}">${impact}</div>
+        </div>
       </div>
     `;
   }).join('');
 }
-
-// ── Stats ────────────────────────────────────────────────────
 
 function renderStats(stats) {
   if (!stats) return;
@@ -496,6 +637,14 @@ function renderStats(stats) {
         <div class="stat-tile__label">Total Pips</div>
         <div class="stat-tile__value" style="color:${parseFloat(stats.totalPips) >= 0 ? 'var(--green)' : 'var(--red)'}">${stats.totalPips}</div>
       </div>
+      <div class="stat-tile">
+        <div class="stat-tile__label">TP1 Hits</div>
+        <div class="stat-tile__value">${stats.tp1Hits}</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-tile__label">SL Hits</div>
+        <div class="stat-tile__value">${stats.slHits}</div>
+      </div>
     `;
   }
 
@@ -510,55 +659,62 @@ function renderStats(stats) {
   }
 }
 
-// ── Risk Calculator ──────────────────────────────────────────
-
 function updateRiskCalc(signal) {
-  if (!signal) return;
-
   const lotInput = document.getElementById('lot-input');
   if (!lotInput) return;
 
-  const update = () => {
-    const lots = parseFloat(lotInput.value) || 0.01;
-    const entry = parseFloat(signal.entry_price) || 0;
-    const sl = parseFloat(signal.stop_loss ?? signal.sl) || 0;
-    const tp1 = parseFloat(signal.tp1) || 0;
-    const tp2 = parseFloat(signal.tp2) || 0;
-    const tp3 = parseFloat(signal.tp3) || 0;
+  const body = document.getElementById('risk-calc-body');
+  if (!body) return;
 
-    // XAU: $1 per pip per 0.01 lot (standard lot = 100oz)
+  const setValues = () => {
+    const vals = body.querySelectorAll('.risk-val__num');
+    if (vals.length < 4) return;
+    if (!lotInput._riskSignal) {
+      vals.forEach((el) => {
+        el.textContent = '--';
+        el.className = 'risk-val__num text-muted';
+      });
+      return;
+    }
+
+    const signalData = lotInput._riskSignal;
+    const lots = parseFloat(lotInput.value) || 0.01;
+    const entry = parseFloat(signalData.entry_price) || 0;
+    const sl = parseFloat(signalData.stop_loss ?? signalData.sl) || 0;
+    const tp1 = parseFloat(signalData.tp1) || 0;
+    const tp2 = parseFloat(signalData.tp2) || 0;
+    const tp3 = parseFloat(signalData.tp3) || 0;
     const mult = lots * 100;
 
-    const body = document.getElementById('risk-calc-body');
-    if (!body) return;
-
-    const vals = body.querySelectorAll('.risk-val__num');
-    if (vals.length >= 4) {
-      vals[0].textContent = `-$${(Math.abs(entry - sl) * mult).toFixed(2)}`;
-      vals[0].className = 'risk-val__num loss';
-      vals[1].textContent = `+$${(Math.abs(tp1 - entry) * mult).toFixed(2)}`;
-      vals[1].className = 'risk-val__num profit';
-      vals[2].textContent = `+$${(Math.abs(tp2 - entry) * mult).toFixed(2)}`;
-      vals[2].className = 'risk-val__num profit';
-      vals[3].textContent = `+$${(Math.abs(tp3 - entry) * mult).toFixed(2)}`;
-      vals[3].className = 'risk-val__num profit';
-    }
+    vals[0].textContent = `-$${(Math.abs(entry - sl) * mult).toFixed(2)}`;
+    vals[0].className = 'risk-val__num loss';
+    vals[1].textContent = `+$${(Math.abs(tp1 - entry) * mult).toFixed(2)}`;
+    vals[1].className = 'risk-val__num profit';
+    vals[2].textContent = `+$${(Math.abs(tp2 - entry) * mult).toFixed(2)}`;
+    vals[2].className = 'risk-val__num profit';
+    vals[3].textContent = `+$${(Math.abs(tp3 - entry) * mult).toFixed(2)}`;
+    vals[3].className = 'risk-val__num profit';
   };
 
-  lotInput.removeEventListener('input', update);
-  lotInput.addEventListener('input', update);
-  update();
+  if (!lotInput._riskBound) {
+    lotInput.addEventListener('input', setValues);
+    lotInput._riskBound = true;
+  }
+
+  lotInput._riskSignal = signal || null;
+  setValues();
 }
 
-// ── Exports ──────────────────────────────────────────────────
 window.UI = {
+  initTheme,
   initNavigation,
+  initAuthModal,
+  setAuthButtonUser,
   updateSessionPill,
   updateHeaderPrice,
   renderSignalHero,
   renderLevels,
   renderConditions,
-  renderIndicators,
   renderDXY,
   renderNewsBanner,
   renderHistory,

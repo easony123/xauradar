@@ -1,8 +1,8 @@
 name: Twelve Data Price Collector
 
 on:
-  schedule:
-    - cron: "2-59/5 * * * *"
+  # Manual fallback only.
+  # Primary schedule moved to Supabase Scheduler (every 3 minutes).
   workflow_dispatch:
 
 permissions:
@@ -10,12 +10,12 @@ permissions:
 
 concurrency:
   group: xauusd-price-collector
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   collect-price:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 6
 
     steps:
       - name: Checkout code
@@ -40,19 +40,37 @@ jobs:
           [ -n "$SUPABASE_URL" ] || (echo "Missing secret: SUPABASE_URL" && exit 1)
           [ -n "$SUPABASE_SERVICE_KEY" ] || (echo "Missing secret: SUPABASE_SERVICE_KEY" && exit 1)
 
-      - name: Collect cycle 1
+      - name: Collect two cycles with retry
         env:
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python twelve_price_collector.py
+        run: |
+          set -euo pipefail
 
-      - name: Sleep for 150s
-        run: sleep 150
+          run_collect() {
+            local cycle="$1"
+            local ok=0
+            for attempt in 1 2; do
+              echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Cycle ${cycle} attempt ${attempt}"
+              if python twelve_price_collector.py; then
+                ok=1
+                break
+              fi
+              echo "Cycle ${cycle} attempt ${attempt} failed."
+              sleep 5
+            done
 
-      - name: Collect cycle 2
-        env:
-          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python twelve_price_collector.py
+            if [ "$ok" -ne 1 ]; then
+              echo "::error::Cycle ${cycle} failed after retries; dashboard may show STALE if last tick is older than 15 minutes."
+              return 1
+            fi
+          }
+
+          run_collect 1
+          sleep 150
+          run_collect 2
+
+      - name: Failure annotation
+        if: failure()
+        run: echo "::error::Twelve Data collector workflow failed. Check logs for retry attempts and last inserted tick timestamp/source."

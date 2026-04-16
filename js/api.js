@@ -80,6 +80,27 @@ function initSupabase() {
   return false;
 }
 
+async function signUpWithEmail(email, password) {
+  if (!supabaseClient) {
+    throw new Error('Supabase not initialized');
+  }
+
+  const { data, error } = await supabaseClient.auth.signUp({
+    email,
+    password,
+  });
+
+  if (error) throw error;
+  return data;
+}
+
+async function getCurrentSession() {
+  if (!supabaseClient) return null;
+  const { data, error } = await supabaseClient.auth.getSession();
+  if (error) throw error;
+  return data?.session || null;
+}
+
 /**
  * Fetch latest market tick from Supabase cache.
  * Returns: { price, bid, ask, direction, spread, timestamp, source, isDelayed, pair }
@@ -92,12 +113,13 @@ async function fetchLivePrice() {
       .from('market_ticks')
       .select('*')
       .order('created_at', { ascending: false })
-      .limit(1);
+      .limit(2);
 
     if (error) throw error;
     if (!data || data.length === 0) return lastLiveSnapshot;
 
     const row = data[0];
+    const prevRow = data.length > 1 ? data[1] : null;
     const price = parseNumber(row.price, 0);
     if (!price) return lastLiveSnapshot;
 
@@ -105,8 +127,11 @@ async function fetchLivePrice() {
     const ask = parseNumber(row.ask, price);
     const ts = toMillis(row.provider_ts) || toMillis(row.created_at) || Date.now();
 
-    if (lastPrice !== null) {
-      priceDirection = price > lastPrice ? 'up' : price < lastPrice ? 'down' : priceDirection;
+    const prevPrice = prevRow ? parseNumber(prevRow.price, NaN) : NaN;
+    if (Number.isFinite(prevPrice)) {
+      priceDirection = price > prevPrice ? 'up' : price < prevPrice ? 'down' : null;
+    } else if (lastPrice !== null) {
+      priceDirection = price > lastPrice ? 'up' : price < lastPrice ? 'down' : null;
     }
     lastPrice = price;
 
@@ -123,6 +148,8 @@ async function fetchLivePrice() {
       timestamp: ts,
       source: stale ? 'STALE' : source,
       isDelayed: Boolean(row.is_delayed) || stale,
+      isStale: stale,
+      ageMinutes: ageMin,
       pair: row.symbol || 'XAU/USD',
     };
 
@@ -284,14 +311,14 @@ async function fetchUpcomingEvents() {
   if (!supabaseClient) return [];
   try {
     const now = new Date().toISOString();
-    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const weekAhead = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
     const { data, error } = await supabaseClient
       .from('economic_events')
       .select('*')
       .gte('event_date', now)
-      .lte('event_date', tomorrow)
-      .eq('impact', 'HIGH')
+      .lte('event_date', weekAhead)
+      .in('impact', ['HIGH', 'MEDIUM'])
       .order('event_date', { ascending: true });
 
     if (error) throw error;
@@ -348,6 +375,8 @@ async function fetchPerformanceStats() {
 
 window.API = {
   initSupabase,
+  signUpWithEmail,
+  getCurrentSession,
   fetchLivePrice,
   fetchCandles,
   fetchChartCandles,

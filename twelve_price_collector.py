@@ -67,7 +67,8 @@ def clamp_to_recent(provider_ts: datetime, max_age_minutes: int = 30) -> datetim
 def twelve_get(path: str, params: dict[str, Any]) -> dict[str, Any] | None:
     request_params = {**params, "apikey": TWELVE_DATA_API_KEY}
     try:
-        resp = requests.get(f"{TWELVE_BASE_URL}{path}", params=request_params, timeout=30)
+        # Keep requests fast so the 2m30 dual-cycle Actions job stays within runtime limits.
+        resp = requests.get(f"{TWELVE_BASE_URL}{path}", params=request_params, timeout=10)
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
@@ -191,11 +192,20 @@ def main() -> int:
         print("ERROR: Missing SUPABASE_URL or SUPABASE_SERVICE_KEY")
         return 1
 
+    now_utc = datetime.now(timezone.utc).isoformat()
+    print(f"Collector run start (UTC): {now_utc}")
+
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     tick = fetch_tick()
     if not tick:
         print("ERROR: No market tick fetched from Twelve Data")
         return 1
+
+    print(
+        "Fetched tick preview: "
+        f"source={tick.get('source')} delayed={tick.get('is_delayed')} "
+        f"provider_ts={tick.get('provider_ts').astimezone(timezone.utc).isoformat()}"
+    )
 
     try:
         write_tick(supabase, tick)

@@ -24,6 +24,8 @@ load_dotenv()
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 TWELVE_BASE_URL = "https://api.twelvedata.com"
 
 if not SUPABASE_URL or not SUPABASE_KEY:
@@ -211,6 +213,7 @@ def check_news_blackout() -> bool:
         resp = (
             supabase.table("economic_events")
             .select("*")
+            .eq("currency", "USD")
             .eq("impact", "HIGH")
             .gte("event_date", window_start.isoformat())
             .lte("event_date", window_end.isoformat())
@@ -551,6 +554,46 @@ def save_indicator_snapshot(df_m15: pd.DataFrame, df_h1: pd.DataFrame, dxy_data:
         print(f"  WARNING: Error saving snapshot: {e}")
 
 
+def send_telegram_signal_alert(signal: dict, regime: dict, decision_reason: str) -> bool:
+    """Send Telegram alert for newly generated BUY/SELL signals."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("  INFO: Telegram alert skipped (missing TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)")
+        return False
+
+    signal_type = signal.get("type", "HOLD")
+    if signal_type not in ("BUY", "SELL"):
+        return False
+
+    icon = "BUY" if signal_type == "BUY" else "SELL"
+    tf = signal.get("timeframe", "M15")
+    message = (
+        f"{icon} XAUUSD {signal_type} signal\n"
+        f"Entry: {signal.get('entry_price')}\n"
+        f"TP1: {signal.get('tp1')} | TP2: {signal.get('tp2')} | TP3: {signal.get('tp3')}\n"
+        f"SL: {signal.get('sl')}\n"
+        f"Confidence: {signal.get('confidence')}% | Regime: {regime.get('name', '--')} | TF: {tf}\n"
+        f"Reason: {decision_reason}\n"
+        f"Time(UTC): {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=15)
+        if resp.status_code >= 400:
+            print(f"  WARNING: Telegram send failed ({resp.status_code}): {resp.text[:200]}")
+            return False
+        print("  Telegram alert sent")
+        return True
+    except Exception as exc:
+        print(f"  WARNING: Telegram send error: {exc}")
+        return False
+
+
 def run_signal_engine():
     print(f"\n{'=' * 60}")
     print(f"Signal Engine - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
@@ -709,6 +752,7 @@ def run_signal_engine():
             supabase.table("signals").insert(signal).execute()
             print(f"\nSignal stored: {action} | Entry {current_price:,.2f} | Confidence {confidence}%")
             print(f"TP1 {tp1:,.2f} | TP2 {tp2:,.2f} | TP3 {tp3:,.2f} | SL {sl:,.2f}")
+            send_telegram_signal_alert(signal, regime, decision_reason)
         except Exception as e:
             print(f"ERROR inserting signal: {e}")
     else:
