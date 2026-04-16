@@ -12,10 +12,12 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
-import pandas_ta as ta
 import requests
 from dotenv import load_dotenv
 from supabase import Client, create_client
+from ta.momentum import StochRSIIndicator
+from ta.trend import ADXIndicator, MACD
+from ta.volatility import AverageTrueRange, KeltnerChannel
 
 load_dotenv()
 
@@ -140,39 +142,47 @@ def fetch_dxy_quote() -> dict | None:
 
 
 def calculate_m15_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    stochrsi = df.ta.stochrsi(length=14, rsi_length=14, k=3, d=3)
-    if stochrsi is not None:
-        df["stochrsi_k"] = stochrsi.iloc[:, 0]
-        df["stochrsi_d"] = stochrsi.iloc[:, 1]
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
 
-    macd = df.ta.macd(fast=12, slow=26, signal=9)
-    if macd is not None:
-        df["macd_line"] = macd.iloc[:, 0]
-        df["macd_signal"] = macd.iloc[:, 1]
-        df["macd_histogram"] = macd.iloc[:, 2]
+    stoch = StochRSIIndicator(close=close, window=14, smooth1=3, smooth2=3)
+    # Keep legacy 0-100 scale expected by thresholds/UI.
+    df["stochrsi_k"] = stoch.stochrsi_k() * 100.0
+    df["stochrsi_d"] = stoch.stochrsi_d() * 100.0
 
-    kc = df.ta.kc(length=20, scalar=2)
-    if kc is not None:
-        df["keltner_lower"] = kc.iloc[:, 0]
-        df["keltner_mid"] = kc.iloc[:, 1]
-        df["keltner_upper"] = kc.iloc[:, 2]
+    macd = MACD(close=close, window_fast=12, window_slow=26, window_sign=9)
+    df["macd_line"] = macd.macd()
+    df["macd_signal"] = macd.macd_signal()
+    df["macd_histogram"] = macd.macd_diff()
 
-    df["atr"] = df.ta.atr(length=14)
+    kc = KeltnerChannel(high=high, low=low, close=close, window=20, window_atr=10, original_version=False)
+    df["keltner_lower"] = kc.keltner_channel_lband()
+    df["keltner_mid"] = kc.keltner_channel_mband()
+    df["keltner_upper"] = kc.keltner_channel_hband()
+
+    atr = AverageTrueRange(high=high, low=low, close=close, window=14)
+    df["atr"] = atr.average_true_range()
     return df
 
 
 def calculate_h1_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    adx = df.ta.adx(length=14)
-    if adx is not None:
-        df["adx"] = adx.iloc[:, 0]
-        df["dmp"] = adx.iloc[:, 1]
-        df["dmn"] = adx.iloc[:, 2]
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
+    volume = df["Volume"].fillna(0)
 
-    vwap = df.ta.vwap()
-    if vwap is not None:
-        df["vwap"] = vwap
+    adx = ADXIndicator(high=high, low=low, close=close, window=14)
+    df["adx"] = adx.adx()
+    df["dmp"] = adx.adx_pos()
+    df["dmn"] = adx.adx_neg()
 
-    df["sma50"] = df.ta.sma(length=50)
+    typical_price = (high + low + close) / 3.0
+    cum_vol = volume.cumsum()
+    cum_tpv = (typical_price * volume).cumsum()
+    df["vwap"] = cum_tpv / cum_vol.replace(0, pd.NA)
+
+    df["sma50"] = close.rolling(window=50, min_periods=1).mean()
     return df
 
 
