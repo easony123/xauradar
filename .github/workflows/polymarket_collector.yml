@@ -1,0 +1,48 @@
+name: Polymarket Collector
+
+on:
+  # Manual fallback only.
+  # Primary schedule runs in Supabase Scheduler every 3 minutes.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xauusd-polymarket-collector
+  cancel-in-progress: false
+
+jobs:
+  collect-polymarket:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Validate required secrets
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          [ -n "$SUPABASE_URL" ] || (echo "Missing secret: SUPABASE_URL" && exit 1)
+          [ -n "$SUPABASE_SERVICE_KEY" ] || (echo "Missing secret: SUPABASE_SERVICE_KEY" && exit 1)
+
+      - name: Run Polymarket collector
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          POLYMARKET_BASE_URL: ${{ secrets.POLYMARKET_BASE_URL }}
+          POLYMARKET_CURATED_LIMIT: ${{ secrets.POLYMARKET_CURATED_LIMIT }}
+        run: python polymarket_crypto_collector.py

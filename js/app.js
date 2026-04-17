@@ -5,6 +5,10 @@
 let currentSignal = null;
 let lastSignalId = null;
 let pollingStarted = false;
+let demoBootstrapped = false;
+let lastXauPriceData = null;
+let lastPolymarketBtc = null;
+let lastPolymarketMarkets = [];
 window._lastPriceDirection = null;
 window.__currentSignal = null;
 
@@ -33,8 +37,21 @@ async function boot() {
   console.log('XAUUSD dashboard booting...');
 
   UI.initTheme();
+  UI.initTranslateToggle();
   UI.initNavigation();
+  UI.initDashboardSwitch();
+  UI.initPolymarketControls();
+  UI.initChartTime();
   UI.updateSessionPill();
+
+  window.addEventListener('xauradar:dashboard-mode', () => {
+    const mode = UI.getDashboardMode();
+    if (mode === 'polymarket') {
+      UI.renderPolymarketDashboard(lastPolymarketBtc, lastPolymarketMarkets);
+    } else if (lastXauPriceData) {
+      UI.updateHeaderPrice(lastXauPriceData);
+    }
+  });
 
   setInterval(UI.updateSessionPill, 30000);
 
@@ -44,8 +61,17 @@ async function boot() {
     UI.initAuthGate({
       onLogin: async (email, password) => API.signInWithEmail(email, password),
       onSignup: async (email, password) => API.signUpWithEmail(email, password),
-      onLogout: async () => API.signOutAuth(),
-      onAuthenticated: () => startPolling(),
+      onLogout: async () => {
+        await API.signOutAuth();
+        demoBootstrapped = false;
+      },
+      onAuthenticated: () => handleAuthenticated(),
+    });
+
+    UI.initDemoControls({
+      onToggleAutoTrade: async (enabled) => API.setDemoAutoTrade(enabled),
+      onResetDemoAccount: async () => API.resetDemoAccount(),
+      onRefresh: async () => pollSupabase(),
     });
 
     try {
@@ -53,7 +79,7 @@ async function boot() {
       if (session?.user?.email) {
         UI.setAuthButtonUser(session.user.email);
         UI.setAuthGateVisible(false);
-        startPolling();
+        await handleAuthenticated();
       } else {
         UI.setAuthButtonUser(null);
         UI.setAuthGateVisible(true);
@@ -69,6 +95,18 @@ async function boot() {
   }
 }
 
+async function handleAuthenticated() {
+  if (!demoBootstrapped) {
+    try {
+      await API.ensureDemoAccount();
+      demoBootstrapped = true;
+    } catch (err) {
+      console.warn('Demo account bootstrap failed:', err?.message || err);
+    }
+  }
+  startPolling();
+}
+
 function startPolling() {
   if (pollingStarted) return;
   pollingStarted = true;
@@ -76,17 +114,22 @@ function startPolling() {
   pollPrice();
   pollSupabase();
   pollDXY();
+  pollPolymarket();
 
   setInterval(pollPrice, 30000);
   setInterval(pollSupabase, 30000);
   setInterval(pollDXY, 60000);
+  setInterval(pollPolymarket, 30000);
 }
 
 async function pollPrice() {
   const data = await API.fetchLivePrice();
   if (!data || data.price <= 0) return;
 
-  UI.updateHeaderPrice(data);
+  lastXauPriceData = data;
+  if (UI.getDashboardMode() === 'xau') {
+    UI.updateHeaderPrice(data);
+  }
   window._lastPriceDirection = data.direction;
 
   if (currentSignal) {
@@ -94,14 +137,30 @@ async function pollPrice() {
   }
 }
 
+async function pollPolymarket() {
+  try {
+    const [btcTick, markets] = await Promise.all([
+      API.fetchLatestBtcTick(),
+      API.fetchPolymarketMarkets(),
+    ]);
+    lastPolymarketBtc = btcTick || null;
+    lastPolymarketMarkets = Array.isArray(markets) ? markets : [];
+    UI.renderPolymarketDashboard(lastPolymarketBtc, lastPolymarketMarkets);
+  } catch (err) {
+    console.error('Polymarket poll error:', err.message);
+  }
+}
+
 async function pollSupabase() {
   try {
-    const [signal, history, snapshot, events, stats] = await Promise.all([
+    const [signal, history, snapshot, events, stats, riskState, demoPerformance] = await Promise.all([
       API.fetchActiveSignal(),
       API.fetchSignalHistory(30),
       API.fetchIndicatorSnapshot(),
       API.fetchUpcomingEvents(),
       API.fetchPerformanceStats(),
+      API.fetchDailyRiskState(),
+      API.fetchDemoPerformance(),
     ]);
 
     currentSignal = signal;
@@ -114,18 +173,20 @@ async function pollSupabase() {
     }
 
     if (signal && signal.id !== lastSignalId) {
-      if (lastSignalId !== null) {
+      if (lastSignalId !== null && String(signal.status || '').toUpperCase() === 'ACTIVE') {
         fireAlert(signal);
       }
       lastSignalId = signal.id;
-      UI.updateRiskCalc(signal);
+      UI.updateRiskCalc(signal, riskState);
     }
+    if (!signal) UI.updateRiskCalc(null, riskState);
 
-    UI.renderConditions(signal, snapshot);
+    UI.renderConditions(signal, snapshot, history);
     UI.renderNewsBanner(events);
     UI.renderEvents(events);
     UI.renderHistory(history);
     UI.renderStats(stats || deriveStatsFromHistory(history));
+    UI.renderDemoDashboard(demoPerformance, demoPerformance?.equityPoints || [], demoPerformance?.trades || []);
   } catch (err) {
     console.error('Supabase poll error:', err.message);
   }

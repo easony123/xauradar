@@ -11,6 +11,21 @@ let tp3Line = null;
 let slLine = null;
 let entryLine = null;
 let currentTimeframe = 15;
+const CHART_TZ = 'Asia/Kuala_Lumpur';
+
+function formatChartTime(valueMs) {
+  const date = new Date(valueMs);
+  if (Number.isNaN(date.getTime())) return '--';
+  const fmt = new Intl.DateTimeFormat('en-MY', {
+    timeZone: CHART_TZ,
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  return `${fmt.format(date)} MYT`;
+}
 
 function getChartTheme(theme) {
   if (theme === 'light') {
@@ -126,6 +141,11 @@ async function loadCandles(bars = 100, minutes = 15) {
 
     candleSeries.setData(candles);
     chart.timeScale().fitContent();
+    const last = candles[candles.length - 1];
+    const lastCandleEl = document.getElementById('chart-last-candle');
+    if (lastCandleEl && last?.time) {
+      lastCandleEl.textContent = `Last candle: ${formatChartTime(last.time * 1000)}`;
+    }
     if (window.__currentSignal) {
       drawSignalOverlay(window.__currentSignal);
     }

@@ -1,11 +1,12 @@
 # Supabase Scheduler (Every 3 Minutes)
 
-This switches price collection from GitHub cron to Supabase scheduler.
+This runs collectors from Supabase scheduler instead of GitHub cron.
 
 ## 1) Deploy edge function
 
 ```bash
 supabase functions deploy price-collector
+supabase functions deploy polymarket-collector
 ```
 
 ## 2) Set edge function secrets
@@ -17,11 +18,22 @@ Set these in Supabase project secrets:
 - `SUPABASE_SERVICE_ROLE_KEY`
 - Optional: `TWELVE_SYMBOL` (`XAU/USD`)
 - Optional hardening: `PRICE_COLLECTOR_CRON_SECRET` (enable header check if you also add matching scheduler header)
+- Optional: `COINGECKO_API_KEY` (for higher CoinGecko limits)
+- Optional hardening: `POLYMARKET_COLLECTOR_CRON_SECRET`
+- Optional: `POLYMARKET_BASE_URL` (default `https://gamma-api.polymarket.com`)
+- Optional: `POLYMARKET_CURATED_LIMIT` (default `18`)
 
 CLI example:
 
 ```bash
-supabase secrets set TWELVE_DATA_API_KEY=... SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... TWELVE_SYMBOL="XAU/USD"
+supabase secrets set \
+  TWELVE_DATA_API_KEY=... \
+  SUPABASE_URL=... \
+  SUPABASE_SERVICE_ROLE_KEY=... \
+  TWELVE_SYMBOL="XAU/USD" \
+  COINGECKO_API_KEY=... \
+  POLYMARKET_BASE_URL="https://gamma-api.polymarket.com" \
+  POLYMARKET_CURATED_LIMIT=18
 ```
 
 ## 3) Create scheduler job (3 min)
@@ -29,18 +41,22 @@ supabase secrets set TWELVE_DATA_API_KEY=... SUPABASE_URL=... SUPABASE_SERVICE_R
 Run:
 
 - [`supabase/scheduler/price_collector_every_3m.sql`](supabase/scheduler/price_collector_every_3m.sql)
+- [`supabase/scheduler/polymarket_collector_every_3m.sql`](supabase/scheduler/polymarket_collector_every_3m.sql)
 
 in Supabase SQL Editor.
 
-The SQL file already targets your current project URL and schedules every 3 minutes.
+Both SQL files already target your current project URL and schedule every 3 minutes.
 
 ## 4) Verify
 
 1. `cron.job` contains `price-collector-every-3m`.
-2. `net._http_response` shows `200` calls every ~3 minutes.
-3. `market_ticks` receives new rows every ~3 minutes.
-4. Website source badge no longer flips to `STALE` during normal operation.
+2. `cron.job` also contains `polymarket-collector-every-3m`.
+3. `net._http_response` shows `200` calls every ~3 minutes.
+4. `market_ticks` receives new rows every ~3 minutes.
+5. `crypto_ticks` and `polymarket_markets` receive updates every ~3 minutes.
+6. Website source badge no longer flips to `STALE` during normal operation.
 
 ## 5) Fallback
 
 GitHub `Twelve Data Price Collector` workflow remains as **manual-only** fallback (`workflow_dispatch`).
+GitHub `Polymarket Collector` workflow is also **manual-only** fallback (`workflow_dispatch`).

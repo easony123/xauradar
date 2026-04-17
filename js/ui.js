@@ -5,6 +5,34 @@
 const APP_TIMEZONE = 'Asia/Kuala_Lumpur';
 const APP_TZ_LABEL = 'MYT';
 const THEME_KEY = 'xauradar_theme';
+const XAU_PIP_SIZE = 0.1;
+const LANG_KEY = 'xauradar_lang';
+const DASHBOARD_MODE_KEY = 'xauradar_dashboard_mode';
+const POLY_CATEGORY_KEY = 'xauradar_poly_category';
+const POLY_SORT_KEY = 'xauradar_poly_sort';
+const POLY_VIEW_KEY = 'xauradar_poly_view';
+
+let activeDashboardMode = 'xau';
+let lastXauPage = 'signal';
+const polymarketState = {
+  btcTick: null,
+  markets: [],
+  category: 'all',
+  query: '',
+  sort: 'volume',
+  view: 'all',
+};
+const POLY_CATEGORIES = ['all', 'crypto', 'gold', 'oil', 'geopolitics', 'fed'];
+const POLY_SORT_OPTIONS = ['volume', 'liquidity', 'ending', 'probability'];
+const POLY_VIEW_OPTIONS = ['all', 'active', 'ending', 'resolved'];
+const POLY_LABELS = {
+  all: 'All',
+  crypto: 'Crypto',
+  gold: 'Gold',
+  oil: 'Oil',
+  geopolitics: 'Geopolitics',
+  fed: 'Fed',
+};
 
 const MY_FULL_TIME_FMT = new Intl.DateTimeFormat('en-MY', {
   timeZone: APP_TIMEZONE,
@@ -79,7 +107,15 @@ function initTheme() {
   }
 }
 
-function setActivePage(target) {
+function setActivePage(target, opts = {}) {
+  const force = Boolean(opts.force);
+  if (activeDashboardMode === 'polymarket' && target !== 'polymarket' && !force) {
+    target = 'polymarket';
+  }
+  if (target !== 'polymarket') {
+    lastXauPage = target;
+  }
+
   const pages = document.querySelectorAll('.page');
   pages.forEach((p) => p.classList.remove('active'));
   const page = document.getElementById(`page-${target}`);
@@ -99,6 +135,312 @@ function initNavigation() {
   document.querySelectorAll('.nav-item').forEach((item) => {
     item.addEventListener('click', () => setActivePage(item.dataset.page));
   });
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatCompactUsd(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '--';
+  if (Math.abs(n) >= 1000000000) return `$${(n / 1000000000).toFixed(2)}B`;
+  if (Math.abs(n) >= 1000000) return `$${(n / 1000000).toFixed(2)}M`;
+  if (Math.abs(n) >= 1000) return `$${(n / 1000).toFixed(1)}K`;
+  return `$${n.toFixed(0)}`;
+}
+
+function getHoursUntil(value) {
+  if (!value) return null;
+  const ts = new Date(value).getTime();
+  if (!Number.isFinite(ts)) return null;
+  return (ts - Date.now()) / 3600000;
+}
+
+function updateDashboardTopbar(mode) {
+  const assetLabel = document.getElementById('topbar-asset-label');
+  const assetSub = document.getElementById('topbar-asset-sub');
+  const modeBadge = document.getElementById('dashboard-mode-badge');
+  const sourceBadge = document.getElementById('source-badge');
+  const sessionPill = document.getElementById('session-pill');
+  const status = document.getElementById('connection-status');
+
+  if (assetLabel) assetLabel.textContent = mode === 'polymarket' ? 'Polymarket' : 'XAU/USD';
+  if (assetSub) assetSub.textContent = mode === 'polymarket' ? 'Crypto + event probabilities' : 'Live market dashboard';
+
+  if (modeBadge) {
+    modeBadge.textContent = mode === 'polymarket' ? 'POLYMARKET' : 'XAU RADAR';
+    modeBadge.className = `mode-badge ${mode === 'polymarket' ? 'mode-badge--polymarket' : 'mode-badge--xau'}`;
+  }
+
+  const hideXauMeta = mode === 'polymarket';
+  if (sourceBadge) sourceBadge.style.display = hideXauMeta ? 'none' : '';
+  if (sessionPill) sessionPill.style.display = hideXauMeta ? 'none' : '';
+  if (status) status.style.display = hideXauMeta ? 'none' : '';
+}
+
+function closeDashboardSwitchMenu() {
+  const btn = document.getElementById('dashboard-switch-btn');
+  const menu = document.getElementById('dashboard-switch-menu');
+  if (!btn || !menu) return;
+  menu.hidden = true;
+  btn.setAttribute('aria-expanded', 'false');
+}
+
+function setDashboardMode(mode, opts = {}) {
+  const persist = opts.persist !== false;
+  activeDashboardMode = mode === 'polymarket' ? 'polymarket' : 'xau';
+
+  const appShell = document.getElementById('app-shell');
+  if (appShell) appShell.classList.toggle('app-shell--polymarket', activeDashboardMode === 'polymarket');
+
+  if (persist) localStorage.setItem(DASHBOARD_MODE_KEY, activeDashboardMode);
+  updateDashboardTopbar(activeDashboardMode);
+
+  const optionNodes = document.querySelectorAll('.dashboard-switch-option');
+  optionNodes.forEach((node) => {
+    const isActive = node.dataset.mode === activeDashboardMode;
+    node.classList.toggle('active', isActive);
+    node.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
+
+  if (activeDashboardMode === 'polymarket') {
+    setActivePage('polymarket', { force: true });
+  } else {
+    setActivePage(lastXauPage || 'signal', { force: true });
+  }
+
+  window.dispatchEvent(new CustomEvent('xauradar:dashboard-mode', { detail: { mode: activeDashboardMode } }));
+}
+
+function initDashboardSwitch() {
+  const btn = document.getElementById('dashboard-switch-btn');
+  const menu = document.getElementById('dashboard-switch-menu');
+  if (!btn || !menu) return;
+  menu.hidden = true;
+  btn.setAttribute('aria-expanded', 'false');
+
+  const saved = localStorage.getItem(DASHBOARD_MODE_KEY);
+  setDashboardMode(saved === 'polymarket' ? 'polymarket' : 'xau', { persist: false });
+
+  btn.addEventListener('click', (evt) => {
+    evt.stopPropagation();
+    const next = menu.hidden;
+    menu.hidden = !next;
+    btn.setAttribute('aria-expanded', next ? 'true' : 'false');
+  });
+
+  menu.querySelectorAll('.dashboard-switch-option').forEach((item) => {
+    item.addEventListener('click', () => {
+      setDashboardMode(item.dataset.mode || 'xau');
+      closeDashboardSwitchMenu();
+    });
+  });
+
+  document.addEventListener('click', (evt) => {
+    if (menu.hidden) return;
+    if (menu.contains(evt.target) || btn.contains(evt.target)) return;
+    closeDashboardSwitchMenu();
+  });
+
+  document.addEventListener('keydown', (evt) => {
+    if (evt.key === 'Escape') closeDashboardSwitchMenu();
+  });
+}
+
+function getDashboardMode() {
+  return activeDashboardMode;
+}
+
+function normalizePolymarketCategory(rawCategory, titleText = '') {
+  const value = String(rawCategory || '').trim().toLowerCase();
+  if (POLY_CATEGORIES.includes(value)) return value;
+
+  const text = `${value} ${String(titleText || '').toLowerCase()}`;
+  if (/(btc|bitcoin|eth|sol|xrp|crypto|doge|altcoin)/.test(text)) return 'crypto';
+  if (/(xau|gold|bullion)/.test(text)) return 'gold';
+  if (/(oil|wti|brent|crude)/.test(text)) return 'oil';
+  if (/(fomc|fed|powell|rate|cpi|inflation|nfp|jobs|yield)/.test(text)) return 'fed';
+  if (/(war|geopolitic|conflict|russia|ukraine|china|taiwan|israel|middle east|election)/.test(text)) return 'geopolitics';
+  return 'other';
+}
+
+function normalizePercent(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return NaN;
+  if (n >= 0 && n <= 1) return n * 100;
+  return n;
+}
+
+function clamp01To100(value) {
+  if (!Number.isFinite(value)) return NaN;
+  return Math.max(0, Math.min(100, value));
+}
+
+function normalizePolymarketRow(row) {
+  const title = String(row?.title || row?.question || 'Untitled market');
+  const category = normalizePolymarketCategory(row?.category, title);
+  const probability = clamp01To100(normalizePercent(row?.probability));
+
+  let yesPct = clamp01To100(normalizePercent(row?.yes_price));
+  let noPct = clamp01To100(normalizePercent(row?.no_price));
+  if (!Number.isFinite(yesPct) && Number.isFinite(probability)) yesPct = probability;
+  if (!Number.isFinite(noPct) && Number.isFinite(yesPct)) noPct = 100 - yesPct;
+  if (!Number.isFinite(yesPct) && Number.isFinite(noPct)) yesPct = 100 - noPct;
+  yesPct = clamp01To100(yesPct);
+  noPct = clamp01To100(noPct);
+
+  const volume = Number(row?.volume);
+  const liquidity = Number(row?.liquidity);
+  const status = String(row?.status || 'active').trim().toLowerCase();
+  const endDate = row?.end_date || row?.end_at || row?.close_time || null;
+  const hoursUntil = getHoursUntil(endDate);
+
+  return {
+    ...row,
+    title,
+    category,
+    probability,
+    yesPct,
+    noPct,
+    volume: Number.isFinite(volume) ? volume : NaN,
+    liquidity: Number.isFinite(liquidity) ? liquidity : NaN,
+    status,
+    endDate,
+    hoursUntil,
+  };
+}
+
+function setPolymarketCategory(category, opts = {}) {
+  const persist = opts.persist !== false;
+  const next = POLY_CATEGORIES.includes(category) ? category : 'all';
+  polymarketState.category = next;
+  if (persist) localStorage.setItem(POLY_CATEGORY_KEY, next);
+}
+
+function setPolymarketSort(sortValue, opts = {}) {
+  const persist = opts.persist !== false;
+  const next = POLY_SORT_OPTIONS.includes(sortValue) ? sortValue : 'volume';
+  polymarketState.sort = next;
+  if (persist) localStorage.setItem(POLY_SORT_KEY, next);
+}
+
+function setPolymarketView(viewValue, opts = {}) {
+  const persist = opts.persist !== false;
+  const next = POLY_VIEW_OPTIONS.includes(viewValue) ? viewValue : 'all';
+  polymarketState.view = next;
+  if (persist) localStorage.setItem(POLY_VIEW_KEY, next);
+}
+
+function initPolymarketControls() {
+  const tabs = Array.from(document.querySelectorAll('#polymarket-tabs .poly-tab'));
+  const viewTabs = Array.from(document.querySelectorAll('#polymarket-view-nav .poly-view-tab'));
+  const searchInput = document.getElementById('polymarket-search');
+  const sortSelect = document.getElementById('polymarket-sort');
+
+  const savedCategory = localStorage.getItem(POLY_CATEGORY_KEY);
+  const savedSort = localStorage.getItem(POLY_SORT_KEY);
+  const savedView = localStorage.getItem(POLY_VIEW_KEY);
+  setPolymarketCategory(savedCategory || 'all', { persist: false });
+  setPolymarketSort(savedSort || 'volume', { persist: false });
+  setPolymarketView(savedView || 'all', { persist: false });
+
+  if (sortSelect) sortSelect.value = polymarketState.sort;
+
+  tabs.forEach((btn) => {
+    if (!btn.dataset.bound) {
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', () => {
+        const category = String(btn.dataset.category || 'all').toLowerCase();
+        setPolymarketCategory(category);
+        renderPolymarketDashboard();
+      });
+    }
+  });
+
+  viewTabs.forEach((btn) => {
+    if (!btn.dataset.bound) {
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', () => {
+        const view = String(btn.dataset.view || 'all').toLowerCase();
+        setPolymarketView(view);
+        renderPolymarketDashboard();
+      });
+    }
+  });
+
+  if (searchInput && !searchInput.dataset.bound) {
+    searchInput.dataset.bound = '1';
+    searchInput.addEventListener('input', () => {
+      polymarketState.query = String(searchInput.value || '').trim().toLowerCase();
+      renderPolymarketDashboard();
+    });
+  }
+
+  if (sortSelect && !sortSelect.dataset.bound) {
+    sortSelect.dataset.bound = '1';
+    sortSelect.addEventListener('change', () => {
+      setPolymarketSort(sortSelect.value);
+      renderPolymarketDashboard();
+    });
+  }
+
+  renderPolymarketDashboard();
+}
+
+function getCurrentGoogTrans() {
+  const match = document.cookie.match(/(?:^|;\s*)googtrans=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+function setGoogTransCookie(value) {
+  document.cookie = `googtrans=${value};path=/`;
+  const host = window.location.hostname;
+  if (host && host !== 'localhost' && host !== '127.0.0.1') {
+    document.cookie = `googtrans=${value};path=/;domain=${host}`;
+  }
+}
+
+function applyTranslateToggleLabel(btn, lang) {
+  if (!btn) return;
+  btn.textContent = lang === 'zh-CN' ? 'EN' : '中文';
+  btn.setAttribute('aria-label', lang === 'zh-CN' ? 'Switch language to English' : '切换到中文');
+}
+
+function initTranslateToggle() {
+  const btn = document.getElementById('translate-toggle');
+  if (!btn) return;
+
+  let lang = 'en';
+  const saved = localStorage.getItem(LANG_KEY);
+  const cookie = getCurrentGoogTrans();
+  if (saved === 'zh-CN' || cookie.includes('/zh-CN')) {
+    lang = 'zh-CN';
+  }
+  applyTranslateToggleLabel(btn, lang);
+
+  btn.addEventListener('click', () => {
+    const next = lang === 'zh-CN' ? 'en' : 'zh-CN';
+    localStorage.setItem(LANG_KEY, next);
+    setGoogTransCookie(next === 'zh-CN' ? '/en/zh-CN' : '/en/en');
+    window.location.reload();
+  });
+}
+
+function initChartTime() {
+  const el = document.getElementById('chart-current-time');
+  if (!el) return;
+  const tick = () => {
+    const nowText = formatMalaysiaTime(new Date(), true);
+    el.textContent = `Now: ${nowText}`;
+  };
+  tick();
+  setInterval(tick, 1000);
 }
 
 function setAuthButtonUser(email) {
@@ -271,9 +613,6 @@ function updateSessionPill() {
 
   const sideSession = document.getElementById('sidebar-session');
   if (sideSession) sideSession.textContent = active ? active.name : 'Closed';
-
-  const pulseSession = document.getElementById('pulse-session-value');
-  if (pulseSession) pulseSession.textContent = active ? `${active.name} Open` : 'Closed';
 }
 
 function updateHeaderPrice(priceData) {
@@ -302,18 +641,24 @@ function updateHeaderPrice(priceData) {
     : Math.max(0, Math.floor((Date.now() - ts) / 60000));
   const ageText = ageMin < 1 ? 'now' : ageMin < 60 ? `${ageMin}m ago` : `${Math.floor(ageMin / 60)}h ago`;
   const source = (priceData.source || '').toUpperCase();
+  const delta = Number(priceData.changeValue);
+  const deltaPct = Number(priceData.changePct);
+  const hasDelta = Number.isFinite(delta) && Number.isFinite(deltaPct);
+  const deltaPips = hasDelta ? (delta / XAU_PIP_SIZE) : NaN;
+  const deltaSign = hasDelta ? (delta > 0 ? '+' : delta < 0 ? '-' : '') : '';
+  const deltaIcon = hasDelta ? (delta > 0 ? '▲' : delta < 0 ? '▼' : '•') : '•';
+  const deltaClass = hasDelta ? (delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat') : 'flat';
+  const deltaText = hasDelta
+    ? `${deltaIcon} ${deltaSign}${Math.abs(delta).toFixed(2)} (${deltaSign}${Math.abs(deltaPct).toFixed(3)}%) | ${deltaSign}${Math.abs(deltaPips).toFixed(1)}p`
+    : 'Δ --';
 
   if (changeEl) {
-    const spread = Number.isFinite(priceData.spread) ? priceData.spread.toFixed(2) : '--';
-    if (source === 'TD_LIVE') {
-      changeEl.textContent = `Last tick: ${ageText} | Source: Twelve Data live | Spread: ${spread}`;
-    } else if (source === 'TD_DELAYED') {
-      changeEl.textContent = `Last tick: ${ageText} | Source: delayed plan`;
-    } else if (source === 'STALE') {
-      changeEl.textContent = `Last tick: ${ageText} | Source: stale cache`;
-    } else {
-      changeEl.textContent = `Last tick: ${ageText} | Source: unknown`;
-    }
+    const freshness = source === 'TD_DELAYED'
+      ? `Last tick: ${ageText} | delayed`
+      : source === 'STALE'
+        ? `Last tick: ${ageText} | stale`
+        : `Last tick: ${ageText}`;
+    changeEl.innerHTML = `<span class="topbar__delta ${deltaClass}">${deltaText}</span> <span class="topbar__fresh">${freshness}</span>`;
   }
 
   if (statusEl) {
@@ -327,45 +672,101 @@ function updateHeaderPrice(priceData) {
       STALE: { label: 'STALE', cls: 'source-badge--prev' },
     };
     const mapped = sourceMap[source] || { label: '--', cls: 'source-badge--unknown' };
-    sourceEl.textContent = `SRC: ${mapped.label}`;
+    sourceEl.textContent = mapped.label;
     sourceEl.className = `source-badge ${mapped.cls}`;
     sourceEl.setAttribute('aria-label', `Price source: ${mapped.label}`);
 
     const sideSource = document.getElementById('sidebar-source');
     if (sideSource) sideSource.textContent = mapped.label;
-    const pulseSource = document.getElementById('pulse-source-value');
-    if (pulseSource) pulseSource.textContent = mapped.label;
   }
+}
+
+function getLaneThreshold(signal) {
+  const lane = String(signal?.lane || 'intraday').toLowerCase();
+  const fromPayload = Number(signal?.conditions_met?.threshold_normalized);
+  if (Number.isFinite(fromPayload) && fromPayload > 0) return fromPayload;
+  return lane === 'swing' ? 72 : 70;
 }
 
 function renderSignalHero(signal) {
   const hero = document.getElementById('signal-hero');
   if (!hero) return;
+  const heroChip = document.querySelector('.hero-chip');
+  if (heroChip) heroChip.textContent = 'Market Signal';
 
   if (!signal) {
     hero.innerHTML = `
-      <div class="signal-hero__badge waiting">Waiting for signal setup...</div>
+      <div class="signal-hero__badge waiting">Waiting for setup...</div>
       <div class="signal-hero__time">Price refresh: 3m | Signal bot: 5m</div>
     `;
     return;
   }
 
   const type = signal.signal_type || signal.type || 'WAIT';
-  const conf = signal.confidence || 0;
-  const confClass = conf >= 70 ? 'conf-high' : conf >= 50 ? 'conf-med' : 'conf-low';
+  const lane = (signal.lane || 'intraday').toUpperCase();
+  const status = (signal.status || '').toUpperCase();
+  const scoreNum = Math.max(0, Math.min(100, Number(signal.score_total || 0)));
+  const confNum = Math.max(0, Math.min(100, Number(signal.confidence || scoreNum || 0)));
+  const conf = confNum.toFixed(0);
+  const score = scoreNum.toFixed(1);
+  const isReady = status === 'ACTIVE';
+  const blockedReason = signal.blocked_reason || signal?.conditions_met?.blocked_reason || null;
+  const reasonMap = {
+    RR_BELOW_MIN: 'Risk/reward too low',
+    HIGH_IMPACT_BLACKOUT: 'High-impact news time',
+    SPREAD_TOO_WIDE: 'Spread too wide',
+    STOP_DISTANCE_OUT_OF_BAND: 'Stop distance not valid',
+    SCORE_BELOW_THRESHOLD: 'Quality score too low',
+    ACTIVE_SIGNAL_EXISTS: 'Another signal is active',
+  };
+  const reasonText = blockedReason ? (reasonMap[blockedReason] || blockedReason) : '';
+  const laneText = lane === 'SWING' ? 'Swing (H1/H4)' : 'Intraday (M15/H1)';
+  const confClass = confNum >= 70 ? 'conf-high' : confNum >= 50 ? 'conf-med' : 'conf-low';
+  const scoreClass = scoreNum >= 70 ? 'conf-high' : scoreNum >= 50 ? 'conf-med' : 'conf-low';
   const time = formatMalaysiaTime(signal.created_at);
   const regime = signal.h1_regime || ((signal.adx_value || 0) >= 20 ? 'Trending' : 'Range');
+  const minTrigger = getLaneThreshold(signal);
+  const setupLine = isReady
+    ? `${type} setup | ${laneText}`
+    : `Candidate only (${type}) | No active trade`;
+
+  const scaleText = 'Native scale: 0-100';
 
   hero.innerHTML = `
-    <div class="signal-hero__badge ${type.toLowerCase()}">${type}</div>
-    <div class="signal-hero__conf">Confidence: <strong class="${confClass}">${conf}%</strong> | Regime: ${regime}</div>
+    <div class="signal-hero__badge ${status === 'REJECTED' ? 'waiting' : type.toLowerCase()}">${status === 'REJECTED' ? 'Not Ready' : type}</div>
+    <div class="signal-hero__conf"><span class="lane-badge lane-badge--${lane.toLowerCase()}">${lane}</span> ${setupLine}</div>
+    <div class="signal-hero__metrics">
+      <div class="hero-meter">
+        <div class="hero-meter__head">Score <strong class="${scoreClass}">${score}/100</strong></div>
+        <div class="hero-meter__track"><span class="hero-meter__fill ${scoreClass}" style="width:${scoreNum.toFixed(1)}%"></span></div>
+      </div>
+      <div class="hero-meter">
+        <div class="hero-meter__head">Confidence <strong class="${confClass}">${conf}%</strong></div>
+        <div class="hero-meter__track"><span class="hero-meter__fill ${confClass}" style="width:${confNum.toFixed(1)}%"></span></div>
+      </div>
+    </div>
+    <div class="signal-hero__conf signal-hero__threshold">Trigger minimum (${laneText}): Score ${minTrigger.toFixed(0)}/100 and Confidence ${minTrigger.toFixed(0)}%</div>
+    <div class="signal-hero__conf signal-hero__threshold">${scaleText}</div>
+    <div class="signal-hero__conf">Regime: ${regime}${reasonText ? ` | ${reasonText}` : ''}</div>
     <div class="signal-hero__time">${time}</div>
   `;
 }
 
 function renderLevels(signal, currentPrice) {
   const container = document.getElementById('levels-row');
-  if (!container || !signal) return;
+  const context = document.getElementById('trade-levels-context');
+  if (!container) return;
+  if (!signal) {
+    if (context) {
+      context.className = 'trade-levels-setup trade-levels-setup--neutral';
+      context.innerHTML = `
+        <span class="trade-levels-setup__title">Setup</span>
+        <span class="trade-levels-setup__value">--</span>
+        <span class="trade-levels-setup__lane">--</span>
+      `;
+    }
+    return;
+  }
 
   const entry = parseFloat(signal.entry_price) || 0;
   const tp1 = parseFloat(signal.tp1) || 0;
@@ -374,6 +775,28 @@ function renderLevels(signal, currentPrice) {
   const sl = parseFloat(signal.stop_loss ?? signal.sl) || 0;
   const price = currentPrice || entry;
   const signalType = signal.signal_type || signal.type;
+  const status = String(signal.status || '').toUpperCase();
+  const lane = String(signal.lane || 'intraday').toLowerCase();
+  if (context) {
+    const laneText = lane === 'swing' ? 'Swing (H1/H4)' : 'Intraday (M15/H1)';
+    const side = String(signalType || '').toUpperCase();
+    const isReady = status === 'ACTIVE';
+    const sideCls = !isReady
+      ? 'trade-levels-setup--neutral'
+      : side === 'BUY'
+        ? 'trade-levels-setup--buy'
+        : side === 'SELL'
+          ? 'trade-levels-setup--sell'
+          : 'trade-levels-setup--neutral';
+    const setupText = isReady ? (side || '--') : 'NO TRADE';
+    const laneNote = isReady ? laneText : `${laneText} | candidate`;
+    context.className = `trade-levels-setup ${sideCls}`;
+    context.innerHTML = `
+      <span class="trade-levels-setup__title">Setup</span>
+      <span class="trade-levels-setup__value">${setupText}</span>
+      <span class="trade-levels-setup__lane">${laneNote}</span>
+    `;
+  }
 
   const dist = (target) => {
     if (!target || !price) return '';
@@ -415,97 +838,175 @@ function renderLevels(signal, currentPrice) {
   `;
 }
 
-function renderConditions(signal, snapshot) {
+function renderConditions(signal, snapshot, history = [], forcedLane = null) {
   const container = document.getElementById('conditions-row');
   if (!container) return;
+  const LANE_KEY = 'xauradar_conditions_lane';
+  const lanes = ['intraday', 'swing'];
 
   const renderRow = (label, items, tone = 'neutral') => `
     <div class="conditions-block conditions-block--${tone}">
       <div class="conditions-block__label">${label}</div>
       <div class="conditions-block__chips">
-        ${items.map((item) => `<span class="cond-chip ${item.met ? 'met' : 'missed'}">${item.label}</span>`).join('')}
+        ${items.map((item) => `<span class="cond-chip ${item.met ? 'met' : 'blocked'}">${item.label}: ${item.met ? 'PASS' : 'BLOCKED'}</span>`).join('')}
       </div>
     </div>
   `;
 
-  const signalConditions = signal && signal.conditions_met && typeof signal.conditions_met === 'object'
-    ? signal.conditions_met
-    : null;
-
-  const buildSignalItems = (conditions) => {
-    const hasNewShape = (
-      Object.prototype.hasOwnProperty.call(conditions, 'trend_filter')
-      || Object.prototype.hasOwnProperty.call(conditions, 'macd_momentum')
-      || Object.prototype.hasOwnProperty.call(conditions, 'volatility_quality')
-    );
-
-    const ordered = hasNewShape
-      ? [
-        { key: 'trend_filter', label: 'trend filter' },
-        { key: 'pullback', label: 'pullback' },
-        { key: 'macd_momentum', label: 'macd momentum' },
-        { key: 'asian_range', label: 'asian range' },
-        { key: 'volatility_quality', label: 'volatility+spread' },
-      ]
-      : [
-        { key: 'stochrsi', label: 'stochrsi cross' },
-        { key: 'pullback', label: 'pullback' },
-        { key: 'macd', label: 'macd momentum' },
-        { key: 'asian_range', label: 'asian range' },
-        { key: 'keltner', label: 'keltner breakout' },
-      ];
-
-    return ordered.map((item) => {
-      const met = Boolean(conditions[item.key]);
-      return { label: item.label, met };
-    });
+  const makeConditionItems = (obj, lane) => {
+    const source = obj && typeof obj === 'object' ? obj : {};
+    const items = [
+      { key: 'trend_filter', label: 'trend direction' },
+      { key: 'momentum', label: 'price momentum' },
+      { key: 'pullback', label: 'entry pullback' },
+      { key: 'session_fit', label: 'session timing' },
+      { key: 'volatility_spread', label: 'market quality' },
+    ];
+    if (lane === 'intraday') {
+      items.push({ key: 'asian_range', label: 'asia breakout' });
+    }
+    return items.map((item) => ({ label: item.label, met: Boolean(source[item.key]) }));
   };
 
   const emptyItems = [
     { label: 'trend filter', met: false },
     { label: 'pullback', met: false },
-    { label: 'macd momentum', met: false },
+    { label: 'momentum', met: false },
     { label: 'asian range', met: false },
     { label: 'volatility+spread', met: false },
+    { label: 'session fit', met: false },
   ];
 
-  const buildPreviewItems = (side) => {
+  const buildPreviewItems = (side, lane) => {
     if (!snapshot) return emptyItems;
-
-    // Snapshot preview is directional guidance, not the final signal engine result.
     const adx = Number(snapshot.adx_value ?? snapshot.adx ?? 0);
     const stochK = Number(snapshot.stochrsi_k ?? 0);
     const stochD = Number(snapshot.stochrsi_d ?? 0);
     const macd = Number(snapshot.macd_value ?? snapshot.macd_histogram ?? 0);
     const atr = Number(snapshot.atr_value ?? snapshot.atr ?? 0);
-
+    const adxMin = lane === 'swing' ? 20 : 18;
     const isBuy = side === 'BUY';
     return [
-      { met: adx >= 18, label: 'trend filter' },
-      { met: isBuy ? (stochK > stochD && stochK >= 20 && stochK <= 80) : (stochK < stochD && stochK >= 20 && stochK <= 80), label: 'pullback' },
-      { met: isBuy ? macd >= 0.2 : macd <= -0.2, label: 'macd momentum' },
+      { met: adx >= adxMin, label: 'trend filter' },
+      { met: isBuy ? (stochK > stochD) : (stochK < stochD), label: 'pullback' },
+      { met: isBuy ? macd >= 0 : macd <= 0, label: 'momentum' },
       { met: false, label: 'asian range' },
       { met: atr > 0, label: 'volatility+spread' },
+      { met: adx >= adxMin, label: 'session fit' },
     ];
   };
 
-  let buyItems = buildPreviewItems('BUY');
-  let sellItems = buildPreviewItems('SELL');
+  const findLaneSide = (lane, side) => {
+    const rows = Array.isArray(history) ? history : [];
+    return rows.find((row) => {
+      const rowLane = String(row.lane || 'intraday').toLowerCase();
+      const rowSide = String(row.signal_type || row.type || '').toUpperCase();
+      return rowLane === lane && rowSide === side && row.conditions_met && typeof row.conditions_met === 'object';
+    }) || null;
+  };
 
-  if (signalConditions) {
-    const signalType = signal.signal_type || signal.type || '';
-    const signalItems = buildSignalItems(signalConditions);
-    if (signalType === 'BUY') {
-      buyItems = signalItems;
-    } else if (signalType === 'SELL') {
-      sellItems = signalItems;
+  const savedLane = localStorage.getItem(LANE_KEY);
+  let activeLane = forcedLane || (lanes.includes(savedLane) ? savedLane : null) || String(signal?.lane || 'intraday').toLowerCase();
+  if (!lanes.includes(activeLane)) activeLane = 'intraday';
+  localStorage.setItem(LANE_KEY, activeLane);
+
+  const renderSidePanel = (lane, side) => {
+    const row = findLaneSide(lane, side);
+    const tone = side === 'BUY' ? 'buy' : 'sell';
+    if (!row) {
+      const previewRaw = buildPreviewItems(side, lane);
+      const previewObj = {
+        trend_filter: previewRaw.find((x) => x.label === 'trend filter')?.met,
+        momentum: previewRaw.find((x) => x.label === 'momentum')?.met,
+        pullback: previewRaw.find((x) => x.label === 'pullback')?.met,
+        session_fit: previewRaw.find((x) => x.label === 'session fit')?.met,
+        asian_range: previewRaw.find((x) => x.label === 'asian range')?.met,
+        volatility_spread: previewRaw.find((x) => x.label === 'volatility+spread')?.met,
+        macro_news: true,
+      };
+      const setupItems = makeConditionItems(previewObj, lane);
+      return `
+        <div class="conditions-lane-panel">
+          <div class="conditions-side conditions-side--${side.toLowerCase()}">${side} setup</div>
+          ${renderRow('Setup checks', setupItems, tone)}
+          <div class="feature-note">Source: live preview (latest indicators)${lane === 'swing' ? ' | Asia breakout is intraday-only' : ''}</div>
+        </div>
+      `;
     }
-  }
+
+    const c = row.conditions_met || {};
+    const gates = c.hard_gates && typeof c.hard_gates === 'object' ? c.hard_gates : {};
+    const newsCtx = c.news_context && typeof c.news_context === 'object' ? c.news_context : {};
+    const setupItems = makeConditionItems(c, lane);
+    const gateItems = [
+      { key: 'spread_ok', label: 'spread cap' },
+      { key: 'min_rr_ok', label: 'min RR' },
+      { key: 'stop_band_ok', label: 'stop band' },
+      { key: 'news_ok', label: 'news blackout' },
+    ].map((item) => ({ label: item.label, met: Boolean(gates[item.key]) }));
+
+    const blockedReason = row.blocked_reason || c.blocked_reason || '';
+    const sessionText = c.session_context || row.session_context || '--';
+    const newsText = newsCtx.high_blackout
+      ? 'High-impact blackout active'
+      : newsCtx.medium_penalty
+        ? 'Medium-impact penalty active'
+        : 'No active news penalty';
+
+    return `
+      <div class="conditions-lane-panel">
+        <div class="conditions-side conditions-side--${side.toLowerCase()}">${side} setup</div>
+        ${renderRow('Setup checks', setupItems, tone)}
+        ${renderRow('Hard gates', gateItems, blockedReason ? 'sell' : 'buy')}
+        <div class="feature-note">Session: ${sessionText} | News: ${newsText}</div>
+        <div class="feature-note">Beginner note: aim for mostly PASS in setup checks, then hard gates must PASS.</div>
+        ${lane === 'swing' ? '<div class="feature-note">Asia breakout is intraday-only, so it is hidden on Swing tab.</div>' : ''}
+        ${blockedReason ? `<div class="feature-note">Blocked reason: ${blockedReason}</div>` : ''}
+      </div>
+    `;
+  };
+
+  const resolveAdaptiveExits = () => {
+    const fromSignal = signal?.conditions_met?.adaptive_exits;
+    if (fromSignal && typeof fromSignal === 'object') return fromSignal;
+    const matchAny = (Array.isArray(history) ? history : []).find((row) => {
+      const rowLane = String(row.lane || 'intraday').toLowerCase();
+      return rowLane === activeLane && row?.conditions_met?.adaptive_exits && typeof row.conditions_met.adaptive_exits === 'object';
+    });
+    return matchAny?.conditions_met?.adaptive_exits || null;
+  };
+
+  const adaptive = resolveAdaptiveExits();
+  const adaptiveText = adaptive
+    ? `Hybrid stop: ATR ${Number(adaptive.atr_stop_dist || 0).toFixed(2)} vs Structure ${Number(adaptive.structure_stop_dist || 0).toFixed(2)} | Regime: ${adaptive.regime || '--'} | Session mult (TP/SL): ${Number(adaptive.session_tp_mult || 1).toFixed(2)}/${Number(adaptive.session_stop_mult || 1).toFixed(2)}`
+    : 'Hybrid stop transparency: waiting for adaptive exit payload.';
 
   container.innerHTML = `
-    ${renderRow('BUY setup', buyItems, 'buy')}
-    ${renderRow('SELL setup', sellItems, 'sell')}
+    <div class="conditions-tabs" role="tablist" aria-label="Condition lanes">
+      ${lanes.map((lane) => `
+        <button type="button" class="conditions-tab ${lane === activeLane ? 'active' : ''}" data-lane="${lane}" role="tab" aria-selected="${lane === activeLane}">
+          ${lane === 'intraday' ? 'Intraday (M15/H1)' : 'Swing (H1/H4)'}
+        </button>
+      `).join('')}
+    </div>
+    ${String(signal?.status || '').toUpperCase() !== 'ACTIVE'
+      ? '<div class="feature-note feature-note--warning">No active trade now. BUY/SELL below are setup checks only.</div>'
+      : ''}
+    <div class="feature-note">${adaptiveText}</div>
+    <div class="conditions-dual">
+      ${renderSidePanel(activeLane, 'BUY')}
+      ${renderSidePanel(activeLane, 'SELL')}
+    </div>
   `;
+
+  container.querySelectorAll('.conditions-tab').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const lane = String(btn.dataset.lane || '').toLowerCase();
+      if (!lanes.includes(lane)) return;
+      localStorage.setItem(LANE_KEY, lane);
+      renderConditions(signal, snapshot, history, lane);
+    });
+  });
 }
 
 function renderDXY(dxyData) {
@@ -521,8 +1022,6 @@ function renderDXY(dxyData) {
       corrEl.textContent = 'Neutral (no DXY feed)';
       corrEl.className = 'dxy-row__corr neutral';
     }
-    const pulseDxy = document.getElementById('pulse-dxy-value');
-    if (pulseDxy) pulseDxy.textContent = 'Unavailable';
     return;
   }
 
@@ -542,8 +1041,6 @@ function renderDXY(dxyData) {
     }
   }
 
-  const pulseDxy = document.getElementById('pulse-dxy-value');
-  if (pulseDxy) pulseDxy.textContent = dxyData.price ? dxyData.price.toFixed(2) : '--';
 }
 
 function renderNewsBanner(events) {
@@ -580,21 +1077,28 @@ function renderNewsBanner(events) {
 function renderHistory(signals) {
   const container = document.getElementById('history-list');
   if (!container) return;
+  const successStatuses = new Set(['HIT_TP1', 'HIT_TP2', 'HIT_TP3']);
+  const successfulSignals = Array.isArray(signals)
+    ? signals.filter((s) => successStatuses.has(String(s.status || '').toUpperCase()))
+    : [];
 
-  if (!signals || signals.length === 0) {
+  if (!successfulSignals || successfulSignals.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
-        <div class="empty-state__title">No signals yet</div>
-        <div class="empty-state__sub">Signals will appear here when generated</div>
+        <div class="empty-state__title">No successful signals yet</div>
+        <div class="empty-state__sub">Only TP-hit signals are shown in history</div>
       </div>
     `;
     return;
   }
 
-  container.innerHTML = signals.map((s) => {
+  container.innerHTML = successfulSignals.map((s) => {
     const type = s.signal_type || s.type || 'WAIT';
     const entry = parseFloat(s.entry_price) || 0;
     const conf = s.confidence || 0;
+    const score = Number(s.score_total || 0).toFixed(1);
+    const lane = (s.lane || 'intraday').toUpperCase();
+    const blockedReason = s.blocked_reason || '';
     const time = formatMalaysiaTime(s.created_at);
     const status = (s.status || 'ACTIVE').replace('_', ' ');
 
@@ -602,13 +1106,15 @@ function renderHistory(signals) {
     if (status.includes('TP')) statusCls = 'hit-tp';
     if (status.includes('SL')) statusCls = 'hit-sl';
     if (status === 'EXPIRED') statusCls = 'expired';
+    if (status === 'REJECTED') statusCls = 'blocked';
 
     return `
       <div class="history-item">
         <div class="history-item__type ${type.toLowerCase()}">${type}</div>
         <div class="history-item__info">
           <div class="history-item__entry">$${entry.toFixed(2)}</div>
-          <div class="history-item__meta">${time}</div>
+          <div class="history-item__meta">${time} | ${lane} | Score ${score}</div>
+          ${blockedReason ? `<div class="history-item__meta">Reason: ${blockedReason}</div>` : ''}
         </div>
         <div class="history-item__right">
           <div class="history-item__status ${statusCls}">${status}</div>
@@ -650,6 +1156,286 @@ function renderEvents(events) {
   }).join('');
 }
 
+function renderPolymarketDashboard(btcTick, markets) {
+  if (btcTick !== undefined) {
+    polymarketState.btcTick = btcTick || null;
+  }
+  if (markets !== undefined) {
+    polymarketState.markets = Array.isArray(markets) ? markets.map(normalizePolymarketRow) : [];
+  }
+
+  const activeBtc = polymarketState.btcTick;
+  const allMarkets = Array.isArray(polymarketState.markets) ? polymarketState.markets : [];
+  const activeCategory = polymarketState.category;
+  const activeSort = polymarketState.sort;
+  const activeQuery = polymarketState.query;
+  const activeView = polymarketState.view;
+
+  const tabButtons = Array.from(document.querySelectorAll('#polymarket-tabs .poly-tab'));
+  const viewButtons = Array.from(document.querySelectorAll('#polymarket-view-nav .poly-view-tab'));
+  const categoryCounts = { all: allMarkets.length };
+  allMarkets.forEach((m) => {
+    if (POLY_CATEGORIES.includes(m.category)) {
+      categoryCounts[m.category] = (categoryCounts[m.category] || 0) + 1;
+    }
+  });
+  tabButtons.forEach((btn) => {
+    const category = String(btn.dataset.category || 'all').toLowerCase();
+    const isActive = category === activeCategory;
+    const baseLabel = btn.dataset.baseLabel || btn.textContent.trim();
+    btn.dataset.baseLabel = baseLabel;
+    const count = Number(categoryCounts[category] || 0);
+    btn.textContent = `${baseLabel.split(' (')[0]} (${count})`;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
+
+  let baseFiltered = allMarkets.slice();
+  if (activeCategory !== 'all') {
+    baseFiltered = baseFiltered.filter((m) => m.category === activeCategory);
+  }
+  if (activeQuery) {
+    baseFiltered = baseFiltered.filter((m) => {
+      const haystack = `${m.title} ${m.category} ${m.status}`.toLowerCase();
+      return haystack.includes(activeQuery);
+    });
+  }
+
+  const viewCounts = {
+    all: baseFiltered.length,
+    active: baseFiltered.filter((m) => m.status === 'active').length,
+    ending: baseFiltered.filter((m) => m.status === 'active' && Number.isFinite(m.hoursUntil) && m.hoursUntil >= 0 && m.hoursUntil <= 72).length,
+    resolved: baseFiltered.filter((m) => m.status.includes('resolved') || m.status.includes('closed')).length,
+  };
+  viewButtons.forEach((btn) => {
+    const view = String(btn.dataset.view || 'all').toLowerCase();
+    const isActive = view === activeView;
+    const baseLabel = btn.dataset.baseLabel || btn.textContent.trim();
+    btn.dataset.baseLabel = baseLabel;
+    const count = Number(viewCounts[view] || 0);
+    btn.textContent = `${baseLabel.split(' (')[0]} (${count})`;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
+
+  let filtered = baseFiltered.slice();
+  if (activeView === 'active') {
+    filtered = filtered.filter((m) => m.status === 'active');
+  } else if (activeView === 'ending') {
+    filtered = filtered.filter((m) => m.status === 'active' && Number.isFinite(m.hoursUntil) && m.hoursUntil >= 0 && m.hoursUntil <= 72);
+  } else if (activeView === 'resolved') {
+    filtered = filtered.filter((m) => m.status.includes('resolved') || m.status.includes('closed'));
+  }
+
+  const sorters = {
+    volume: (a, b) => (Number(b.volume) || -Infinity) - (Number(a.volume) || -Infinity),
+    liquidity: (a, b) => (Number(b.liquidity) || -Infinity) - (Number(a.liquidity) || -Infinity),
+    ending: (a, b) => {
+      const ah = Number.isFinite(a.hoursUntil) && a.hoursUntil >= 0 ? a.hoursUntil : Infinity;
+      const bh = Number.isFinite(b.hoursUntil) && b.hoursUntil >= 0 ? b.hoursUntil : Infinity;
+      return ah - bh;
+    },
+    probability: (a, b) => {
+      const av = Number.isFinite(a.yesPct) ? Math.max(a.yesPct, 100 - a.yesPct) : -Infinity;
+      const bv = Number.isFinite(b.yesPct) ? Math.max(b.yesPct, 100 - b.yesPct) : -Infinity;
+      return bv - av;
+    },
+  };
+  filtered.sort(sorters[activeSort] || sorters.volume);
+
+  const btcPriceEl = document.getElementById('polymarket-btc-price');
+  const btcChangeEl = document.getElementById('polymarket-btc-change');
+  const syncEl = document.getElementById('polymarket-last-sync');
+  const kpiCountEl = document.getElementById('polymarket-kpi-count');
+  const kpiVolEl = document.getElementById('polymarket-kpi-volume');
+  const kpiEndingEl = document.getElementById('polymarket-kpi-ending');
+  const trendEl = document.getElementById('polymarket-trending-list');
+  const listEl = document.getElementById('polymarket-markets-list');
+
+  if (btcPriceEl) {
+    if (!activeBtc || !Number.isFinite(Number(activeBtc.price))) {
+      btcPriceEl.textContent = '$--';
+      btcPriceEl.className = 'polymarket-btc__price';
+    } else {
+      const price = Number(activeBtc.price);
+      const change24h = Number(activeBtc.change_24h ?? activeBtc.change24h);
+      const cls = Number.isFinite(change24h) ? (change24h >= 0 ? 'up' : 'down') : '';
+      btcPriceEl.textContent = `$${price.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+      btcPriceEl.className = `polymarket-btc__price ${cls}`.trim();
+    }
+  }
+
+  if (btcChangeEl) {
+    if (!activeBtc) {
+      btcChangeEl.textContent = 'Waiting for feed...';
+    } else {
+      const change24h = Number(activeBtc.change_24h ?? activeBtc.change24h);
+      if (Number.isFinite(change24h)) {
+        const sign = change24h >= 0 ? '+' : '-';
+        const icon = change24h >= 0 ? '\u25B2' : '\u25BC';
+        btcChangeEl.textContent = `${icon} ${sign}${Math.abs(change24h).toFixed(2)}% (24h)`;
+      } else {
+        btcChangeEl.textContent = '24h change unavailable';
+      }
+    }
+  }
+
+  if (syncEl) {
+    const ts = activeBtc?.provider_ts || activeBtc?.created_at || null;
+    syncEl.textContent = ts ? `Last sync: ${formatMalaysiaTime(ts)}` : 'Last sync: --';
+  }
+
+  if (kpiCountEl) {
+    kpiCountEl.textContent = String(filtered.length);
+  }
+  if (kpiVolEl) {
+    const totalVol = filtered.reduce((sum, m) => sum + (Number.isFinite(m.volume) ? m.volume : 0), 0);
+    kpiVolEl.textContent = formatCompactUsd(totalVol);
+  }
+  if (kpiEndingEl) {
+    const endingSoon = filtered.filter((m) => Number.isFinite(m.hoursUntil) && m.hoursUntil >= 0 && m.hoursUntil <= 48).length;
+    kpiEndingEl.textContent = String(endingSoon);
+  }
+
+  if (getDashboardMode() === 'polymarket') {
+    const headerPrice = document.getElementById('header-price');
+    const headerChange = document.getElementById('header-change');
+    if (headerPrice) {
+      if (activeBtc && Number.isFinite(Number(activeBtc.price))) {
+        const price = Number(activeBtc.price);
+        const chg = Number(activeBtc.change_24h ?? activeBtc.change24h);
+        headerPrice.textContent = `$${price.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+        headerPrice.className = 'topbar__price';
+        if (Number.isFinite(chg)) {
+          headerPrice.classList.add(chg >= 0 ? 'up' : 'down');
+        } else {
+          headerPrice.classList.add('neutral');
+        }
+      } else {
+        headerPrice.textContent = '$--';
+        headerPrice.className = 'topbar__price neutral';
+      }
+    }
+    if (headerChange) {
+      if (activeBtc) {
+        const chg = Number(activeBtc.change_24h ?? activeBtc.change24h);
+        const ts = activeBtc.provider_ts || activeBtc.created_at;
+        const age = ts ? `Last sync: ${formatMalaysiaTime(ts, true)}` : 'Last sync: --';
+        headerChange.textContent = Number.isFinite(chg)
+          ? `BTC 24h: ${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% | ${age}`
+          : `BTC 24h: -- | ${age}`;
+      } else {
+        headerChange.textContent = 'Waiting for BTC feed';
+      }
+    }
+  }
+
+  if (trendEl) {
+    const trending = filtered
+      .filter((m) => m.status === 'active')
+      .slice()
+      .sort((a, b) => (Number(b.volume) || -Infinity) - (Number(a.volume) || -Infinity))
+      .slice(0, 5);
+    if (trending.length === 0) {
+      trendEl.innerHTML = '<div class="feature-note">No trending markets for this tab yet.</div>';
+    } else {
+      trendEl.innerHTML = trending.map((market) => {
+        const prob = Number.isFinite(market.yesPct) ? `${market.yesPct.toFixed(1)}% YES` : '--';
+        const vol = Number.isFinite(market.volume) ? formatCompactUsd(market.volume) : '--';
+        const catLabel = POLY_LABELS[market.category] || market.category.toUpperCase();
+        return `
+          <div class="poly-trend-chip">
+            <div class="poly-trend-chip__title">${escapeHtml(market.title)}</div>
+            <div class="poly-trend-chip__meta">${escapeHtml(catLabel)} | ${escapeHtml(prob)} | Vol ${escapeHtml(vol)}</div>
+          </div>
+        `;
+      }).join('');
+    }
+  }
+
+  if (!listEl) return;
+  if (!Array.isArray(filtered) || filtered.length === 0) {
+    listEl.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-state__title">No markets in this tab yet</div>
+        <div class="empty-state__sub">Try another category, clear search, or wait for the next collector sync.</div>
+      </div>
+    `;
+    return;
+  }
+
+  const top = filtered.slice(0, 24);
+  listEl.innerHTML = top.map((market) => {
+    const category = POLY_LABELS[market.category] || String(market.category || 'Other').toUpperCase();
+    const yesText = Number.isFinite(market.yesPct) ? `${Math.round(market.yesPct)}c` : '--';
+    const noText = Number.isFinite(market.noPct) ? `${Math.round(market.noPct)}c` : '--';
+    const yesPctText = Number.isFinite(market.yesPct) ? `${market.yesPct.toFixed(1)}%` : '--';
+    const noPctText = Number.isFinite(market.noPct) ? `${market.noPct.toFixed(1)}%` : '--';
+    const probWidth = Number.isFinite(market.yesPct) ? Math.max(2, Math.min(98, market.yesPct)) : 50;
+    const volText = Number.isFinite(market.volume) ? formatCompactUsd(market.volume) : '--';
+    const liqText = Number.isFinite(market.liquidity) ? formatCompactUsd(market.liquidity) : '--';
+
+    let endText = '--';
+    if (market.endDate) {
+      if (Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0) {
+        endText = market.hoursUntil < 24
+          ? `${market.hoursUntil.toFixed(1)}h left`
+          : `${Math.ceil(market.hoursUntil / 24)}d left`;
+      } else if (Number.isFinite(market.hoursUntil) && market.hoursUntil < 0) {
+        endText = 'Ended';
+      } else {
+        endText = formatMalaysiaTime(market.endDate, true);
+      }
+    }
+
+    let statusText = 'ACTIVE';
+    let statusClass = 'status-active';
+    if (market.status.includes('closed')) {
+      statusText = 'CLOSED';
+      statusClass = 'status-closed';
+    } else if (market.status.includes('resolved')) {
+      statusText = 'RESOLVED';
+      statusClass = 'status-resolved';
+    }
+
+    return `
+      <article class="polymarket-card">
+        <div class="polymarket-card__head">
+          <div class="polymarket-card__title">${escapeHtml(market.title)}</div>
+          <span class="polymarket-card__cat">${escapeHtml(category)}</span>
+        </div>
+        <div class="polymarket-card__odds">
+          <div class="poly-odd poly-odd--yes">
+            <div class="poly-odd__label">Yes</div>
+            <div class="poly-odd__value">${yesText}</div>
+            <div class="poly-odd__pct">${yesPctText}</div>
+          </div>
+          <div class="poly-odd poly-odd--no">
+            <div class="poly-odd__label">No</div>
+            <div class="poly-odd__value">${noText}</div>
+            <div class="poly-odd__pct">${noPctText}</div>
+          </div>
+        </div>
+        <div class="poly-prob-row">
+          <span>YES probability: ${yesPctText}</span>
+          <span>NO probability: ${noPctText}</span>
+        </div>
+        <div class="poly-prob-track" aria-label="Yes probability">
+          <span class="poly-prob-fill" style="width:${probWidth.toFixed(1)}%"></span>
+        </div>
+        <div class="polymarket-card__meta">
+          <span>YES: ${yesPctText}</span>
+          <span>NO: ${noPctText}</span>
+          <span>Volume: ${volText}</span>
+          <span>Liquidity: ${liqText}</span>
+          <span>Ends: ${endText}</span>
+          <span class="polymarket-card__status ${statusClass}">${statusText}</span>
+        </div>
+      </article>
+    `;
+  }).join('');
+}
+
 function renderStats(stats) {
   if (!stats) return;
 
@@ -657,7 +1443,8 @@ function renderStats(stats) {
   if (heroEl) {
     heroEl.innerHTML = `
       <div class="stats-hero__winrate">${stats.winRate}%</div>
-      <div class="stats-hero__label">Win Rate (${stats.totalSignals} signals)</div>
+      <div class="stats-hero__label">Win Rate (${stats.totalSignals} signals) | Expectancy ${stats.expectancy ?? '--'}R</div>
+      ${stats.windows ? `<div class="stats-hero__label">Rolling E: 50=${stats.windows.w50?.expectancy ?? '--'} | 100=${stats.windows.w100?.expectancy ?? '--'} | 300=${stats.windows.w300?.expectancy ?? '--'}</div>` : ''}
     `;
   }
 
@@ -669,16 +1456,24 @@ function renderStats(stats) {
         <div class="stat-tile__value">${stats.totalSignals}</div>
       </div>
       <div class="stat-tile">
+        <div class="stat-tile__label">Executed / Rejected</div>
+        <div class="stat-tile__value">${stats.executedCount ?? '--'} / ${stats.rejectedCount ?? '--'}</div>
+      </div>
+      <div class="stat-tile">
         <div class="stat-tile__label">Total Pips</div>
         <div class="stat-tile__value" style="color:${parseFloat(stats.totalPips) >= 0 ? 'var(--green)' : 'var(--red)'}">${stats.totalPips}</div>
       </div>
       <div class="stat-tile">
-        <div class="stat-tile__label">TP1 Hits</div>
-        <div class="stat-tile__value">${stats.tp1Hits}</div>
+        <div class="stat-tile__label">Avg RR / Drawdown</div>
+        <div class="stat-tile__value">${stats.avgRR ?? '--'} / ${stats.drawdown ?? '--'}</div>
       </div>
       <div class="stat-tile">
-        <div class="stat-tile__label">SL Hits</div>
-        <div class="stat-tile__value">${stats.slHits}</div>
+        <div class="stat-tile__label">Lane Win (I / S)</div>
+        <div class="stat-tile__value">${stats.laneStats?.intraday?.winRate ?? '--'}% / ${stats.laneStats?.swing?.winRate ?? '--'}%</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-tile__label">Lane Expectancy (I / S)</div>
+        <div class="stat-tile__value">${stats.laneStats?.intraday?.expectancy ?? '--'} / ${stats.laneStats?.swing?.expectancy ?? '--'}</div>
       </div>
     `;
   }
@@ -694,12 +1489,190 @@ function renderStats(stats) {
   }
 }
 
-function updateRiskCalc(signal) {
+function initDemoControls({ onToggleAutoTrade, onResetDemoAccount, onRefresh }) {
+  const toggle = document.getElementById('demo-auto-toggle');
+  const resetBtn = document.getElementById('demo-reset-btn');
+  const status = document.getElementById('demo-control-status');
+
+  if (toggle && !toggle.dataset.bound) {
+    toggle.dataset.bound = '1';
+    toggle.addEventListener('change', async () => {
+      toggle.disabled = true;
+      if (status) status.textContent = 'Saving auto-trade setting...';
+      try {
+        await onToggleAutoTrade(Boolean(toggle.checked));
+        if (status) status.textContent = `Auto-trade ${toggle.checked ? 'enabled' : 'disabled'}.`;
+        if (onRefresh) await onRefresh();
+      } catch (err) {
+        if (status) status.textContent = err?.message || 'Failed to update auto-trade setting.';
+      } finally {
+        toggle.disabled = false;
+      }
+    });
+  }
+
+  if (resetBtn && !resetBtn.dataset.bound) {
+    resetBtn.dataset.bound = '1';
+    resetBtn.addEventListener('click', async () => {
+      const ok = window.confirm('Reset demo account to $100,000 and clear all demo trades?');
+      if (!ok) return;
+      resetBtn.disabled = true;
+      if (status) status.textContent = 'Resetting demo account...';
+      try {
+        await onResetDemoAccount();
+        if (status) status.textContent = 'Demo account reset complete.';
+        if (onRefresh) await onRefresh();
+      } catch (err) {
+        if (status) status.textContent = err?.message || 'Demo reset failed.';
+      } finally {
+        resetBtn.disabled = false;
+      }
+    });
+  }
+}
+
+function formatMoney(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '--';
+  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function renderDemoEquityCurve(points) {
+  const host = document.getElementById('demo-equity-chart');
+  if (!host) return;
+  if (!Array.isArray(points) || points.length < 2) {
+    host.innerHTML = '<div class="feature-note">Need at least 2 equity points to draw curve.</div>';
+    return;
+  }
+
+  const values = points.map((p) => Number(p.equity || 0)).filter((v) => Number.isFinite(v));
+  if (values.length < 2) {
+    host.innerHTML = '<div class="feature-note">Need at least 2 equity points to draw curve.</div>';
+    return;
+  }
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = Math.max(max - min, 1);
+
+  const w = 100;
+  const h = 36;
+  const pad = 2;
+  const path = values
+    .map((v, i) => {
+      const x = pad + ((w - pad * 2) * i) / Math.max(values.length - 1, 1);
+      const y = h - pad - ((h - pad * 2) * (v - min)) / span;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(' ');
+
+  host.innerHTML = `
+    <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-label="Demo equity curve">
+      <polyline class="equity-line" points="${path}"></polyline>
+    </svg>
+  `;
+}
+
+function renderDemoDashboard(perf, curve = [], trades = []) {
+  const summary = document.getElementById('demo-summary-grid');
+  const lane = document.getElementById('demo-lane-split');
+  const history = document.getElementById('demo-trade-history');
+  const toggle = document.getElementById('demo-auto-toggle');
+  const status = document.getElementById('demo-control-status');
+
+  if (!summary || !lane || !history) return;
+
+  if (!perf || !perf.account) {
+    summary.innerHTML = `
+      <div class="stat-tile">
+        <div class="stat-tile__label">Demo account</div>
+        <div class="stat-tile__value">Loading...</div>
+      </div>
+    `;
+    lane.innerHTML = '';
+    history.innerHTML = '<div class="feature-note">No demo trades yet.</div>';
+    renderDemoEquityCurve(curve);
+    return;
+  }
+
+  const roiColor = perf.roiPct >= 0 ? 'var(--green)' : 'var(--red)';
+  const pnlColor = perf.pnlTotal >= 0 ? 'var(--green)' : 'var(--red)';
+
+  summary.innerHTML = `
+    <div class="stat-tile"><div class="stat-tile__label">Starting Capital</div><div class="stat-tile__value">${formatMoney(perf.starting)}</div></div>
+    <div class="stat-tile"><div class="stat-tile__label">Balance</div><div class="stat-tile__value">${formatMoney(perf.balance)}</div></div>
+    <div class="stat-tile"><div class="stat-tile__label">Equity</div><div class="stat-tile__value">${formatMoney(perf.equity)}</div></div>
+    <div class="stat-tile"><div class="stat-tile__label">ROI</div><div class="stat-tile__value" style="color:${roiColor}">${perf.roiPct.toFixed(2)}%</div></div>
+    <div class="stat-tile"><div class="stat-tile__label">Open Trades</div><div class="stat-tile__value">${perf.openTrades}</div></div>
+    <div class="stat-tile"><div class="stat-tile__label">Win Rate</div><div class="stat-tile__value">${perf.winRate.toFixed(1)}%</div></div>
+    <div class="stat-tile"><div class="stat-tile__label">Max Drawdown</div><div class="stat-tile__value">${perf.maxDrawdownPct.toFixed(2)}%</div></div>
+    <div class="stat-tile"><div class="stat-tile__label">Net PnL</div><div class="stat-tile__value" style="color:${pnlColor}">${formatMoney(perf.pnlTotal)}</div></div>
+  `;
+
+  lane.innerHTML = `
+    <div class="lane-chip">
+      <span>Intraday</span>
+      <span>${perf.laneStats?.intraday?.trades ?? 0} trades</span>
+      <span>${(perf.laneStats?.intraday?.winRate ?? 0).toFixed(1)}% win</span>
+    </div>
+    <div class="lane-chip">
+      <span>Swing</span>
+      <span>${perf.laneStats?.swing?.trades ?? 0} trades</span>
+      <span>${(perf.laneStats?.swing?.winRate ?? 0).toFixed(1)}% win</span>
+    </div>
+  `;
+
+  const rows = Array.isArray(trades) ? trades.slice(0, 20) : [];
+  if (rows.length === 0) {
+    history.innerHTML = '<div class="feature-note">No demo trades yet.</div>';
+  } else {
+    history.innerHTML = rows.map((t) => {
+      const side = String(t.side || '--').toUpperCase();
+      const laneText = String(t.lane || 'intraday').toUpperCase();
+      const statusText = String(t.status || '--').toUpperCase();
+      const pnl = Number(t.pnl_usd || 0);
+      const pnlCls = pnl >= 0 ? 'profit' : 'loss';
+      return `
+        <div class="demo-trade-row">
+          <div class="demo-trade-row__left">
+            <div class="demo-trade-row__meta">${laneText} | ${side} | ${statusText}</div>
+            <div class="demo-trade-row__sub">Entry ${Number(t.entry || 0).toFixed(2)} | SL ${Number(t.sl || 0).toFixed(2)}</div>
+          </div>
+          <div class="demo-trade-row__right">
+            <div class="demo-trade-row__pnl ${pnlCls}">${formatMoney(pnl)}</div>
+            <div class="demo-trade-row__sub">${formatMalaysiaTime(t.opened_at, true)}</div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  if (toggle) toggle.checked = Boolean(perf.account.auto_trade_enabled);
+  if (status && !status.textContent) {
+    status.textContent = `Expectancy: ${Number(perf.expectancyR || 0).toFixed(2)}R`;
+  }
+
+  renderDemoEquityCurve((Array.isArray(curve) && curve.length > 0) ? curve : perf.equityPoints || []);
+}
+
+function updateRiskCalc(signal, riskState = null) {
   const lotInput = document.getElementById('lot-input');
   if (!lotInput) return;
+  const equityInput = document.getElementById('equity-input');
+  const riskPctInput = document.getElementById('risk-percent-input');
+  const laneSelect = document.getElementById('lane-risk-select');
+  const posSizeEl = document.getElementById('position-size-value');
+  const riskGuardEl = document.getElementById('risk-guard-note');
 
   const body = document.getElementById('risk-calc-body');
   if (!body) return;
+
+  const applyLanePreset = () => {
+    if (!riskPctInput || !laneSelect) return;
+    if (!riskPctInput.dataset.userEdited) {
+      riskPctInput.value = laneSelect.value === 'swing' ? '0.75' : '0.50';
+    }
+  };
 
   const setValues = () => {
     const vals = body.querySelectorAll('.risk-val__num');
@@ -713,36 +1686,73 @@ function updateRiskCalc(signal) {
     }
 
     const signalData = lotInput._riskSignal;
-    const lots = parseFloat(lotInput.value) || 0.01;
+    const equity = parseFloat(equityInput?.value || '10000') || 10000;
+    const riskPct = parseFloat(riskPctInput?.value || signalData.risk_percent_used || '0.50') || 0.5;
     const entry = parseFloat(signalData.entry_price) || 0;
     const sl = parseFloat(signalData.stop_loss ?? signalData.sl) || 0;
     const tp1 = parseFloat(signalData.tp1) || 0;
     const tp2 = parseFloat(signalData.tp2) || 0;
     const tp3 = parseFloat(signalData.tp3) || 0;
-    const mult = lots * 100;
+    const stopDist = Math.abs(entry - sl);
+    const riskDollars = equity * (riskPct / 100);
+    const posSize = stopDist > 0 ? riskDollars / stopDist : 0;
+    if (posSizeEl) posSizeEl.textContent = Number.isFinite(posSize) ? posSize.toFixed(3) : '--';
 
-    vals[0].textContent = `-$${(Math.abs(entry - sl) * mult).toFixed(2)}`;
+    vals[0].textContent = `-$${riskDollars.toFixed(2)}`;
     vals[0].className = 'risk-val__num loss';
-    vals[1].textContent = `+$${(Math.abs(tp1 - entry) * mult).toFixed(2)}`;
+    vals[1].textContent = `+$${(riskDollars * (Math.abs(tp1 - entry) / Math.max(stopDist, 0.0001))).toFixed(2)}`;
     vals[1].className = 'risk-val__num profit';
-    vals[2].textContent = `+$${(Math.abs(tp2 - entry) * mult).toFixed(2)}`;
+    vals[2].textContent = `+$${(riskDollars * (Math.abs(tp2 - entry) / Math.max(stopDist, 0.0001))).toFixed(2)}`;
     vals[2].className = 'risk-val__num profit';
-    vals[3].textContent = `+$${(Math.abs(tp3 - entry) * mult).toFixed(2)}`;
+    vals[3].textContent = `+$${(riskDollars * (Math.abs(tp3 - entry) / Math.max(stopDist, 0.0001))).toFixed(2)}`;
     vals[3].className = 'risk-val__num profit';
   };
 
   if (!lotInput._riskBound) {
     lotInput.addEventListener('input', setValues);
+    if (equityInput) equityInput.addEventListener('input', setValues);
+    if (riskPctInput) {
+      riskPctInput.addEventListener('input', () => {
+        riskPctInput.dataset.userEdited = '1';
+        setValues();
+      });
+    }
+    if (laneSelect) {
+      laneSelect.addEventListener('change', () => {
+        if (riskPctInput?.dataset) delete riskPctInput.dataset.userEdited;
+        applyLanePreset();
+        setValues();
+      });
+    }
     lotInput._riskBound = true;
   }
 
+  applyLanePreset();
+  if (laneSelect && signal && !laneSelect.dataset.userEdited) {
+    laneSelect.value = signal.lane === 'swing' ? 'swing' : 'intraday';
+    applyLanePreset();
+  }
   lotInput._riskSignal = signal || null;
   setValues();
+
+  if (riskGuardEl && riskState) {
+    const dailyLoss = Number(riskState.daily_loss_pct || 0).toFixed(2);
+    const streak = Number(riskState.consecutive_sl || 0);
+    const cooldown = riskState.cooldown_until ? `Cooldown until ${formatMalaysiaTime(riskState.cooldown_until, true)}` : 'No cooldown';
+    const halt = riskState.halted_reason ? ` | Halt: ${riskState.halted_reason}` : '';
+    riskGuardEl.textContent = `Daily risk: ${dailyLoss}% loss | Consecutive SL: ${streak} | ${cooldown}${halt}`;
+  }
 }
 
 window.UI = {
   initTheme,
+  initTranslateToggle,
   initNavigation,
+  initDashboardSwitch,
+  initPolymarketControls,
+  setDashboardMode,
+  getDashboardMode,
+  initChartTime,
   initAuthGate,
   setAuthGateVisible,
   setAuthButtonUser,
@@ -755,6 +1765,11 @@ window.UI = {
   renderNewsBanner,
   renderHistory,
   renderEvents,
+  renderPolymarketDashboard,
   renderStats,
+  initDemoControls,
+  renderDemoDashboard,
+  renderDemoEquityCurve,
   updateRiskCalc,
 };
+

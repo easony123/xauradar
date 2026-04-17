@@ -14,6 +14,7 @@
   <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
+  <div id="google_translate_element" style="position:absolute;left:-9999px;top:-9999px;"></div>
   <svg width="0" height="0" style="position:absolute">
     <symbol id="icon-signal" viewBox="0 0 24 24">
       <path d="M4 14h3l2-4 3 8 3-6 2 2h3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -29,6 +30,9 @@
     </symbol>
     <symbol id="icon-stats" viewBox="0 0 24 24">
       <path d="M5 20V11M12 20V7M19 20V4M3 20h18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="icon-switch" viewBox="0 0 24 24">
+      <path d="M9 8l3-3 3 3M15 16l-3 3-3-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     </symbol>
   </svg>
 
@@ -133,8 +137,17 @@
         <div class="topbar__left">
           <div class="topbar__logo">Au</div>
           <div class="topbar__asset-wrap">
-            <span class="topbar__asset">XAU/USD</span>
-            <span class="topbar__asset-sub">Live market dashboard</span>
+            <div class="topbar__asset-row">
+              <span class="topbar__asset" id="topbar-asset-label">XAU/USD</span>
+              <button type="button" class="dashboard-switch-btn" id="dashboard-switch-btn" aria-label="Switch dashboard" aria-expanded="false" aria-controls="dashboard-switch-menu">
+                <svg class="icon-svg" aria-hidden="true"><use href="#icon-switch"></use></svg>
+              </button>
+            </div>
+            <span class="topbar__asset-sub" id="topbar-asset-sub">Live market dashboard</span>
+            <div class="dashboard-switch-menu" id="dashboard-switch-menu" hidden>
+              <button type="button" class="dashboard-switch-option active" data-mode="xau">XAU Radar</button>
+              <button type="button" class="dashboard-switch-option" data-mode="polymarket">Polymarket</button>
+            </div>
           </div>
         </div>
         <div class="topbar__center">
@@ -143,13 +156,15 @@
         </div>
         <div class="topbar__right">
           <div class="topbar__meta">
+            <span class="mode-badge mode-badge--xau" id="dashboard-mode-badge">XAU RADAR</span>
             <span class="session-pill" id="session-pill">--</span>
-            <span class="source-badge source-badge--unknown" id="source-badge" aria-label="Price source: unknown">SRC: --</span>
+            <span class="source-badge source-badge--unknown" id="source-badge" aria-label="Price source: unknown">--</span>
             <div class="status-indicator" id="connection-status" aria-label="Connection status">
               <span class="status-dot offline"></span>
             </div>
           </div>
           <div class="topbar__actions">
+            <button type="button" class="theme-toggle" id="translate-toggle" aria-label="Toggle language">中文</button>
             <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">Dark</button>
             <button type="button" class="auth-trigger" id="auth-logout-btn" aria-label="Logout">Logout</button>
           </div>
@@ -166,7 +181,7 @@
           <div class="card card--hero signal-section signal-section--hero">
             <div class="hero-gradient">
               <div class="hero-gradient__meta">
-                <span class="hero-chip">Real-time Market Data</span>
+                <span class="hero-chip">Market Signal</span>
                 <span class="hero-live">Live</span>
               </div>
               <div class="signal-hero" id="signal-hero">
@@ -176,34 +191,15 @@
             </div>
           </div>
 
-          <div class="pulse-grid signal-section signal-section--pulse">
-            <div class="card card--compact" id="pulse-source">
-              <div class="card__header"><span class="card__title">Source</span></div>
-              <div class="card__body">
-                <div class="feature-note">Beginner note: data source quality (LIVE, DELAY, STALE).</div>
-                <div class="pulse-value" id="pulse-source-value">--</div>
-              </div>
-            </div>
-            <div class="card card--compact" id="pulse-session">
-              <div class="card__header"><span class="card__title">Session</span></div>
-              <div class="card__body">
-                <div class="feature-note">Beginner note: major market hours (Asia, London, New York).</div>
-                <div class="pulse-value" id="pulse-session-value">--</div>
-              </div>
-            </div>
-            <div class="card card--compact" id="pulse-dxy">
-              <div class="card__header"><span class="card__title">DXY</span></div>
-              <div class="card__body">
-                <div class="feature-note">Beginner note: DXY is US Dollar Index, often inverse to gold.</div>
-                <div class="pulse-value" id="pulse-dxy-value">--</div>
-              </div>
-            </div>
-          </div>
-
           <div class="card signal-section signal-section--levels">
             <div class="card__header"><span class="card__title">Trade Levels</span></div>
             <div class="card__body">
               <div class="feature-note">Beginner note: Entry = open price, TP = target profit, SL = stop loss.</div>
+              <div class="trade-levels-setup trade-levels-setup--neutral" id="trade-levels-context">
+                <span class="trade-levels-setup__title">Setup</span>
+                <span class="trade-levels-setup__value">--</span>
+                <span class="trade-levels-setup__lane">--</span>
+              </div>
               <div class="levels-row" id="levels-row">
                 <div class="level-item"><div class="level-item__label entry">Entry</div><div class="level-item__price">--</div></div>
                 <div class="level-item"><div class="level-item__label tp">TP1</div><div class="level-item__price">--</div></div>
@@ -242,10 +238,84 @@
           </div>
         </section>
 
+        <section class="page page--polymarket" id="page-polymarket">
+          <div class="poly-overview-bar">
+            <div class="poly-overview-main">
+              <div class="polymarket-btc">
+                <div class="polymarket-btc__label">Bitcoin Spot (USD)</div>
+                <div class="polymarket-btc__price" id="polymarket-btc-price">$--</div>
+                <div class="polymarket-btc__change" id="polymarket-btc-change">Waiting for feed...</div>
+                <div class="signal-hero__time" id="polymarket-last-sync">Last sync: --</div>
+              </div>
+              <span class="poly-live-pill">Live</span>
+            </div>
+            <div class="poly-kpi-grid poly-kpi-grid--compact">
+              <div class="poly-kpi">
+                <div class="poly-kpi__label">Markets</div>
+                <div class="poly-kpi__value" id="polymarket-kpi-count">--</div>
+              </div>
+              <div class="poly-kpi">
+                <div class="poly-kpi__label">Total Volume</div>
+                <div class="poly-kpi__value" id="polymarket-kpi-volume">--</div>
+              </div>
+              <div class="poly-kpi">
+                <div class="poly-kpi__label">Ending Soon</div>
+                <div class="poly-kpi__value" id="polymarket-kpi-ending">--</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="poly-toolbar">
+            <div class="poly-search">
+              <input type="search" id="polymarket-search" placeholder="Search markets..." aria-label="Search markets">
+            </div>
+            <label class="poly-sort" for="polymarket-sort">
+              <span>Sort</span>
+              <select id="polymarket-sort">
+                <option value="volume">Highest Volume</option>
+                <option value="liquidity">Highest Liquidity</option>
+                <option value="ending">Ending Soon</option>
+                <option value="probability">Probability</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="poly-tabs" id="polymarket-tabs" role="tablist" aria-label="Polymarket categories">
+            <button type="button" class="poly-tab active" data-category="all" role="tab" aria-selected="true">All</button>
+            <button type="button" class="poly-tab" data-category="crypto" role="tab" aria-selected="false">Crypto</button>
+            <button type="button" class="poly-tab" data-category="gold" role="tab" aria-selected="false">Gold</button>
+            <button type="button" class="poly-tab" data-category="oil" role="tab" aria-selected="false">Oil</button>
+            <button type="button" class="poly-tab" data-category="geopolitics" role="tab" aria-selected="false">Geopolitics</button>
+            <button type="button" class="poly-tab" data-category="fed" role="tab" aria-selected="false">Fed</button>
+          </div>
+
+          <div class="poly-view-nav" id="polymarket-view-nav" role="tablist" aria-label="Polymarket view filter">
+            <button type="button" class="poly-view-tab active" data-view="all" role="tab" aria-selected="true">All</button>
+            <button type="button" class="poly-view-tab" data-view="active" role="tab" aria-selected="false">Active</button>
+            <button type="button" class="poly-view-tab" data-view="ending" role="tab" aria-selected="false">Ending Soon</button>
+            <button type="button" class="poly-view-tab" data-view="resolved" role="tab" aria-selected="false">Resolved</button>
+          </div>
+
+          <div class="poly-strip" id="polymarket-trending-list">
+            <div class="feature-note">Trending markets will appear here when data arrives.</div>
+          </div>
+
+          <div class="polymarket-market-grid" id="polymarket-markets-list">
+            <div class="empty-state">
+              <div class="empty-state__title">No market data yet</div>
+              <div class="empty-state__sub">Collector will populate this section automatically</div>
+            </div>
+          </div>
+        </section>
+
         <section class="page" id="page-chart">
           <div class="chart-fullscreen">
             <div class="chart-toolbar">
-              <span class="chart-toolbar__title">XAUUSD | M15</span>
+              <div class="chart-toolbar__left">
+                <span class="chart-toolbar__title">XAUUSD | M15</span>
+                <span class="chart-time-pill" id="chart-current-time">Now: -- MYT</span>
+                <span class="chart-time-pill chart-time-pill--subtle" id="chart-last-candle">Last candle: --</span>
+              </div>
               <div class="tf-group">
                 <button class="tf-btn" data-tf="5">M5</button>
                 <button class="tf-btn active" data-tf="15">M15</button>
@@ -255,6 +325,47 @@
             </div>
             <div class="chart-note">Beginner note: shorter timeframe = faster moves but more noise. M5 is best for quick price structure.</div>
             <div id="chart-canvas"></div>
+          </div>
+
+          <div class="card mt-12">
+            <div class="card__header">
+              <span class="card__title">Demo Paper Account</span>
+              <span class="badge-inline">Start $100,000</span>
+            </div>
+            <div class="card__body">
+              <div class="feature-note">Beginner note: this is simulated trading only. No real broker orders are placed.</div>
+              <div class="demo-controls">
+                <label class="demo-toggle">
+                  <input type="checkbox" id="demo-auto-toggle" checked>
+                  <span>Auto Trade</span>
+                </label>
+                <button type="button" class="demo-reset-btn" id="demo-reset-btn">Reset Demo Account</button>
+              </div>
+              <div class="feature-note" id="demo-control-status">Auto-trade follows ACTIVE signals.</div>
+
+              <div class="stats-grid demo-summary-grid" id="demo-summary-grid">
+                <div class="stat-tile">
+                  <div class="stat-tile__label">Demo account</div>
+                  <div class="stat-tile__value">Loading...</div>
+                </div>
+              </div>
+
+              <div class="demo-lane-split" id="demo-lane-split"></div>
+
+              <div class="demo-equity-wrap">
+                <div class="demo-equity-head">Equity Curve</div>
+                <div class="demo-equity-chart" id="demo-equity-chart">
+                  <div class="feature-note">Need at least 2 equity points to draw curve.</div>
+                </div>
+              </div>
+
+              <div class="demo-history">
+                <div class="demo-history__head">Demo Trade History</div>
+                <div class="demo-trade-history" id="demo-trade-history">
+                  <div class="feature-note">No demo trades yet.</div>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -328,19 +439,40 @@
           <div class="card mt-12">
             <div class="card__header"><span class="card__title">Risk Calculator</span></div>
             <div class="card__body">
-              <div class="feature-note">Beginner note: estimates loss/profit by lot size using current signal levels.</div>
+              <div class="feature-note">Beginner note: position size = (equity x risk%) / stop distance.</div>
               <div class="risk-grid" id="risk-calc-body">
                 <div class="risk-input">
                   <label for="lot-input">Lot Size</label>
                   <input type="number" id="lot-input" value="0.01" step="0.01" min="0.01">
+                </div>
+                <div class="risk-input">
+                  <label for="equity-input">Equity ($)</label>
+                  <input type="number" id="equity-input" value="10000" step="100" min="100">
+                </div>
+                <div class="risk-input">
+                  <label for="risk-percent-input">Risk %</label>
+                  <input type="number" id="risk-percent-input" value="0.50" step="0.05" min="0.10">
+                </div>
+                <div class="risk-input">
+                  <label for="lane-risk-select">Lane Preset</label>
+                  <select id="lane-risk-select">
+                    <option value="intraday">Intraday (0.50%)</option>
+                    <option value="swing">Swing (0.75%)</option>
+                  </select>
+                </div>
+                <div class="risk-val">
+                  <div class="risk-val__label">Position Size</div>
+                  <div class="risk-val__num" id="position-size-value">--</div>
                 </div>
                 <div class="risk-val"><div class="risk-val__label">Risk</div><div class="risk-val__num text-muted">--</div></div>
                 <div class="risk-val"><div class="risk-val__label">TP1</div><div class="risk-val__num text-muted">--</div></div>
                 <div class="risk-val"><div class="risk-val__label">TP2</div><div class="risk-val__num text-muted">--</div></div>
                 <div class="risk-val"><div class="risk-val__label">TP3</div><div class="risk-val__num text-muted">--</div></div>
               </div>
+              <div class="feature-note" id="risk-guard-note">Daily risk state unavailable</div>
             </div>
           </div>
+
         </section>
       </div>
 
@@ -383,5 +515,19 @@
   <script src="js/chart.js"></script>
   <script src="js/ui.js"></script>
   <script src="js/app.js"></script>
+  <script>
+    function googleTranslateElementInit() {
+      if (!window.google || !window.google.translate || !window.google.translate.TranslateElement) return;
+      new window.google.translate.TranslateElement(
+        {
+          pageLanguage: 'en',
+          includedLanguages: 'en,zh-CN',
+          autoDisplay: false,
+        },
+        'google_translate_element'
+      );
+    }
+  </script>
+  <script src="https://translate.google.com/translate_a/element.js?cb=googleTranslateElementInit"></script>
 </body>
 </html>

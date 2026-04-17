@@ -22,6 +22,13 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
 SYMBOL = os.getenv("TWELVE_SYMBOL", "XAU/USD")
 TWELVE_BASE_URL = "https://api.twelvedata.com"
+REQUESTS_TRUST_ENV = os.getenv("REQUESTS_TRUST_ENV", "false").strip().lower() in ("1", "true", "yes", "on")
+if not REQUESTS_TRUST_ENV:
+    for _proxy_key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        os.environ.pop(_proxy_key, None)
+
+HTTP = requests.Session()
+HTTP.trust_env = REQUESTS_TRUST_ENV
 
 
 def parse_float(value: Any) -> float | None:
@@ -68,7 +75,7 @@ def twelve_get(path: str, params: dict[str, Any]) -> dict[str, Any] | None:
     request_params = {**params, "apikey": TWELVE_DATA_API_KEY}
     try:
         # Keep requests fast so the 2m30 dual-cycle Actions job stays within runtime limits.
-        resp = requests.get(f"{TWELVE_BASE_URL}{path}", params=request_params, timeout=10)
+        resp = HTTP.get(f"{TWELVE_BASE_URL}{path}", params=request_params, timeout=10)
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
