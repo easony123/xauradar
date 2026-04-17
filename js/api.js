@@ -14,7 +14,6 @@ let lastPrice = null;
 let priceDirection = null; // 'up' | 'down' | null
 let lastLiveSnapshot = null;
 const API_XAU_PIP_SIZE = 0.1;
-const ALLOWED_POLY_CATEGORIES = ['trending', 'breaking', 'new', 'politics', 'finance', 'geopolitics', 'oil', 'xauusd'];
 
 function normalizeSource(raw) {
   const src = String(raw || '').trim().toUpperCase();
@@ -347,14 +346,13 @@ async function fetchLatestBtcTick() {
   }
 }
 
-async function fetchPolymarketMarkets(limit = 500) {
+async function fetchPolymarketMarkets(limit = 1000) {
   if (!supabaseClient) return [];
   try {
     const { data, error } = await supabaseClient
       .from('polymarket_markets')
       .select('*')
-      .in('category', ALLOWED_POLY_CATEGORIES)
-      .order('category', { ascending: true })
+      .order('provider_ts', { ascending: false })
       .order('probability', { ascending: false })
       .limit(limit);
 

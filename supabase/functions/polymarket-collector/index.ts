@@ -30,17 +30,6 @@ const SERVICE_ROLE_KEY = Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPAB
 const POLYMARKET_COLLECTOR_CRON_SECRET = Deno.env.get("POLYMARKET_COLLECTOR_CRON_SECRET") ?? "";
 const COINGECKO_API_KEY = Deno.env.get("COINGECKO_API_KEY") ?? "";
 const POLYMARKET_BASE_URL = Deno.env.get("POLYMARKET_BASE_URL") ?? "https://gamma-api.polymarket.com";
-const ALLOWED_POLY_CATEGORIES = new Set([
-  "trending",
-  "breaking",
-  "new",
-  "politics",
-  "finance",
-  "geopolitics",
-  "oil",
-  "xauusd",
-]);
-
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -95,7 +84,7 @@ function classifyCategory(text: string): string {
   if (/\b(oil|brent|wti|crude|opec|energy)\b/.test(t)) return "oil";
   if (/\b(politics|election|president|senate|congress|minister|government|white house|parliament|trump|biden)\b/.test(t)) return "politics";
   if (/\b(war|ukraine|russia|israel|gaza|taiwan|geopolitic|missile|sanction|ceasefire|conflict|putin|xi jinping|iran|nato|military)\b/.test(t)) return "geopolitics";
-  if (/\b(finance|financial|fomc|fed|powell|rate cut|rate hike|interest rate|us rates|cpi|pce|nfp|inflation|gdp|economy|tariff|yield|stocks|nasdaq|dow|s&p|bond|dollar|usd)\b/.test(t)) return "finance";
+  if (/\b(finance|financial|fomc|fed|powell|rate cut|rate hike|interest rate|us rates|cpi|pce|nfp|inflation|gdp|economy|tariff|yield|stocks|nasdaq|dow|s&p|bond|dollar|usd|bitcoin|btc|ethereum|eth|solana|crypto|token|coin|doge|memecoin|altcoin|defi|etf)\b/.test(t)) return "finance";
   return "other";
 }
 
@@ -170,18 +159,18 @@ function normalizePolymarketRow(row: Record<string, unknown>): PolymarketRow | n
     return String(tag ?? "").trim();
   }).join(" ");
 
-  const category = classifyCategory([
+  const rawCategory = String(row.category ?? "").trim().toLowerCase() || "other";
+  const displayCategory = classifyCategory([
     title,
     String(row.description ?? ""),
-    String(row.category ?? ""),
+    rawCategory,
     String(row.series ?? ""),
     String(row.topic ?? ""),
     tagText,
   ].join(" "));
-  if (category === "other" || !ALLOWED_POLY_CATEGORIES.has(category)) return null;
 
   const slugRaw = String(row.slug ?? row.market_slug ?? row.id ?? "").trim();
-  const marketSlug = slugRaw || `${category}-${slugify(title)}`;
+  const marketSlug = slugRaw || `${displayCategory}-${slugify(title)}`;
   const providerTs = toIso(row.updatedAt ?? row.updated_at ?? row.createdAt ?? row.created_at) ?? new Date().toISOString();
 
   let status = "active";
@@ -192,7 +181,7 @@ function normalizePolymarketRow(row: Record<string, unknown>): PolymarketRow | n
     market_slug: marketSlug,
     provider_ts: providerTs,
     title: title.slice(0, 240),
-    category,
+    category: rawCategory,
     probability: Math.max(0, Math.min(100, probability)),
     yes_price: yesPrice,
     no_price: noPrice,
@@ -204,6 +193,8 @@ function normalizePolymarketRow(row: Record<string, unknown>): PolymarketRow | n
     meta: {
       market_id: row.id ?? null,
       outcomes: row.outcomes ?? null,
+      raw_category: rawCategory,
+      display_category: displayCategory,
     },
   };
 }

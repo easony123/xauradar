@@ -24,18 +24,6 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "").strip()
 POLYMARKET_BASE_URL = (os.getenv("POLYMARKET_BASE_URL") or "https://gamma-api.polymarket.com").rstrip("/")
 
-ALLOWED_POLY_CATEGORIES = {
-    "trending",
-    "breaking",
-    "new",
-    "politics",
-    "finance",
-    "geopolitics",
-    "oil",
-    "xauusd",
-}
-
-
 def parse_num(value: Any) -> float | None:
     try:
         n = float(value)
@@ -101,7 +89,7 @@ def classify_category(text: str) -> str:
         return "politics"
     if re.search(r"\b(war|ukraine|russia|israel|gaza|taiwan|geopolitic|missile|sanction|ceasefire|conflict|putin|xi jinping|iran|nato|military)\b", t):
         return "geopolitics"
-    if re.search(r"\b(finance|financial|fomc|fed|powell|rate cut|rate hike|interest rate|us rates|cpi|pce|nfp|inflation|gdp|economy|tariff|yield|stocks|nasdaq|dow|s&p|bond|dollar|usd)\b", t):
+    if re.search(r"\b(finance|financial|fomc|fed|powell|rate cut|rate hike|interest rate|us rates|cpi|pce|nfp|inflation|gdp|economy|tariff|yield|stocks|nasdaq|dow|s&p|bond|dollar|usd|bitcoin|btc|ethereum|eth|solana|crypto|token|coin|doge|memecoin|altcoin|defi|etf)\b", t):
         return "finance"
     return "other"
 
@@ -196,13 +184,12 @@ def normalize_market_row(row: dict[str, Any]) -> dict[str, Any] | None:
             tags_blob,
         ]
     )
-    category = classify_category(context_blob)
-    if category == "other" or category not in ALLOWED_POLY_CATEGORIES:
-        return None
+    raw_category = str(row.get("category") or "").strip().lower() or "other"
+    display_category = classify_category(context_blob)
 
     slug = str(row.get("slug") or row.get("market_slug") or row.get("id") or "").strip()
     if not slug:
-        slug = f"{category}-{slugify(title)}"
+        slug = f"{display_category}-{slugify(title)}"
 
     status = "active"
     if row.get("closed") is True or row.get("active") is False:
@@ -214,7 +201,7 @@ def normalize_market_row(row: dict[str, Any]) -> dict[str, Any] | None:
         "market_slug": slug,
         "provider_ts": to_iso(row.get("updatedAt") or row.get("updated_at") or row.get("createdAt") or row.get("created_at")) or datetime.now(timezone.utc).isoformat(),
         "title": title[:240],
-        "category": category,
+        "category": raw_category,
         "probability": round(max(0.0, min(100.0, probability)), 4),
         "yes_price": round(yes_price, 6) if yes_price is not None else None,
         "no_price": round(no_price, 6) if no_price is not None else None,
@@ -226,6 +213,8 @@ def normalize_market_row(row: dict[str, Any]) -> dict[str, Any] | None:
         "meta": {
             "market_id": row.get("id"),
             "outcomes": row.get("outcomes"),
+            "raw_category": raw_category,
+            "display_category": display_category,
         },
     }
 
@@ -283,7 +272,7 @@ def main() -> int:
             print(f"ERROR writing polymarket_markets: {exc}")
             return 1
     else:
-        print("WARN: No Polymarket markets fetched for allowed categories")
+        print("WARN: No Polymarket markets fetched")
 
     return 0
 

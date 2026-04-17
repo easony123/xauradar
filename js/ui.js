@@ -1,4 +1,4 @@
-﻿/**
+/**
  * ui.js - DOM rendering for XAU Radar dashboard.
  */
 
@@ -270,19 +270,23 @@ function getDashboardMode() {
   return activeDashboardMode;
 }
 
-function normalizePolymarketCategory(rawCategory, titleText = '') {
-  const value = String(rawCategory || '').trim().toLowerCase();
-  if (POLY_CATEGORIES.includes(value)) return value;
+function normalizePolymarketCategory(rawCategory, titleText = '', meta = null) {
+  const metaDisplay = String(meta?.display_category || meta?.displayCategory || '').trim().toLowerCase();
+  if (POLY_CATEGORIES.includes(metaDisplay) && metaDisplay !== 'all') return metaDisplay;
 
-  const text = `${value} ${String(titleText || '').toLowerCase()}`;
+  const value = String(rawCategory || '').trim().toLowerCase();
+  if (POLY_CATEGORIES.includes(value) && value !== 'all') return value;
+
+  const rawSource = String(meta?.raw_category || meta?.rawCategory || value || '').toLowerCase();
+  const text = `${metaDisplay} ${rawSource} ${value} ${String(titleText || '').toLowerCase()}`;
   if (/(trending|trend)/.test(text)) return 'trending';
-  if (/(breaking|urgent|headline)/.test(text)) return 'breaking';
-  if (/(new|fresh|latest)/.test(text)) return 'new';
-  if (/(xau|gold|bullion|xauusd)/.test(text)) return 'xauusd';
-  if (/(oil|wti|brent|crude)/.test(text)) return 'oil';
-  if (/(politics|election|president|senate|congress|minister|party|government|trump|biden)/.test(text)) return 'politics';
-  if (/(fomc|fed|powell|rate|cpi|inflation|nfp|jobs|yield|treasury|tariff|economy|recession|gdp|finance|financial|stocks|nasdaq|s&p|dow|bond|dollar|usd)/.test(text)) return 'finance';
-  if (/(war|geopolitic|geopolitics|conflict|russia|ukraine|china|taiwan|israel|middle east|iran|sanction|ceasefire|military|nato)/.test(text)) return 'geopolitics';
+  if (/(breaking|urgent|headline|flash|developing)/.test(text)) return 'breaking';
+  if (/(new|fresh|latest|launched|launch)/.test(text)) return 'new';
+  if (/(xau|gold|bullion|xauusd|precious metal)/.test(text)) return 'xauusd';
+  if (/(oil|wti|brent|crude|opec|energy)/.test(text)) return 'oil';
+  if (/(politics|election|president|senate|congress|minister|party|government|white house|parliament|trump|biden|campaign|vote|voting)/.test(text)) return 'politics';
+  if (/(war|geopolitic|geopolitics|conflict|russia|ukraine|china|taiwan|israel|middle east|iran|sanction|ceasefire|military|nato|putin|xi jinping|gaza|hezbollah)/.test(text)) return 'geopolitics';
+  if (/(fomc|fed|powell|rate|cpi|inflation|nfp|jobs|yield|treasury|tariff|economy|recession|gdp|finance|financial|stocks|nasdaq|s&p|dow|bond|dollar|usd|bitcoin|btc|ethereum|eth|solana|crypto|token|coin|doge|memecoin|altcoin|defi|etf)/.test(text)) return 'finance';
   return 'other';
 }
 
@@ -309,8 +313,8 @@ function clamp01To100(value) {
 
 function normalizePolymarketRow(row) {
   const title = String(row?.title || row?.question || 'Untitled market');
-  const category = normalizePolymarketCategory(row?.category, title);
-  if (!POLY_CATEGORIES.includes(category) || category === 'all') return null;
+  const meta = row?.meta && typeof row.meta === 'object' ? row.meta : null;
+  const category = normalizePolymarketCategory(row?.category, title, meta);
   const marketType = classifyBetType(title);
   const probability = clamp01To100(normalizePercent(row?.probability));
 
@@ -332,6 +336,7 @@ function normalizePolymarketRow(row) {
     ...row,
     title,
     category,
+    rawCategory: String(meta?.raw_category || row?.category || 'other').trim().toLowerCase() || 'other',
     marketType,
     probability,
     yesPct,
@@ -457,8 +462,8 @@ function setGoogTransCookie(value) {
 
 function applyTranslateToggleLabel(btn, lang) {
   if (!btn) return;
-  btn.textContent = lang === 'zh-CN' ? 'EN' : 'ä¸­æ–‡';
-  btn.setAttribute('aria-label', lang === 'zh-CN' ? 'Switch language to English' : 'åˆ‡æ¢åˆ°ä¸­æ–‡');
+  btn.textContent = lang === 'zh-CN' ? 'EN' : '中文';
+  btn.setAttribute('aria-label', lang === 'zh-CN' ? 'Switch language to English' : 'Switch language to Chinese');
 }
 
 function initTranslateToggle() {
@@ -1212,12 +1217,14 @@ function renderPolymarketDashboard(btcTick, markets) {
   }
   if (markets !== undefined) {
     polymarketState.markets = Array.isArray(markets)
-      ? markets.map(normalizePolymarketRow).filter((row) => row && POLY_CATEGORIES.includes(row.category) && row.category !== 'all')
+      ? markets.map(normalizePolymarketRow).filter(Boolean)
       : [];
   }
 
   const activeBtc = polymarketState.btcTick;
-  const allMarkets = Array.isArray(polymarketState.markets) ? polymarketState.markets : [];
+  const rawMarkets = Array.isArray(polymarketState.markets) ? polymarketState.markets : [];
+  const allMarkets = rawMarkets.filter((row) => POLY_CATEGORIES.includes(row.category) && row.category !== 'all');
+  const unmatchedCount = Math.max(0, rawMarkets.length - allMarkets.length);
   const activeCategory = polymarketState.category;
   const activeSort = polymarketState.sort;
   const activeQuery = polymarketState.query;
@@ -1324,6 +1331,7 @@ function renderPolymarketDashboard(btcTick, markets) {
   const kpiCountEl = document.getElementById('polymarket-kpi-count');
   const kpiVolEl = document.getElementById('polymarket-kpi-volume');
   const kpiEndingEl = document.getElementById('polymarket-kpi-ending');
+  const diagnosticsEl = document.getElementById('polymarket-diagnostics');
   const trendEl = document.getElementById('polymarket-trending-list');
   const listEl = document.getElementById('polymarket-markets-list');
 
@@ -1370,6 +1378,9 @@ function renderPolymarketDashboard(btcTick, markets) {
   if (kpiEndingEl) {
     const endingSoon = filtered.filter((m) => Number.isFinite(m.hoursUntil) && m.hoursUntil >= 0 && m.hoursUntil <= 48).length;
     kpiEndingEl.textContent = String(endingSoon);
+  }
+  if (diagnosticsEl) {
+    diagnosticsEl.textContent = `Loaded ${allMarkets.length} mapped markets | ${unmatchedCount} unmatched`;
   }
 
   if (getDashboardMode() === 'polymarket') {
