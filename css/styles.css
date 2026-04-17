@@ -115,6 +115,10 @@ input {
   height: 100dvh;
 }
 
+.app-shell--hidden {
+  display: none;
+}
+
 .sidebar {
   display: none;
   width: var(--sidebar-w);
@@ -1360,66 +1364,67 @@ input {
   }
 }
 
-.auth-modal {
-  position: fixed;
-  inset: 0;
-  z-index: 90;
+.auth-gate {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background:
+    radial-gradient(circle at 15% 0%, rgba(107, 45, 255, 0.2), transparent 45%),
+    radial-gradient(circle at 90% 95%, rgba(79, 140, 255, 0.16), transparent 42%),
+    var(--bg-app);
+}
+
+.auth-gate--hidden {
   display: none;
 }
 
-.auth-modal.is-open {
-  display: block;
-}
-
-.auth-modal__backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(10, 12, 18, 0.62);
-  backdrop-filter: blur(3px);
-}
-
-.auth-card {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: min(420px, calc(100% - 24px));
-  transform: translate(-50%, -50%);
-  background: linear-gradient(165deg, var(--bg-card), var(--bg-card-2));
+.auth-gate__panel {
+  width: min(430px, 100%);
+  border-radius: var(--radius-xl);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
+  background: linear-gradient(165deg, var(--bg-card), var(--bg-card-2));
   box-shadow: var(--shadow-soft);
   padding: 18px;
 }
 
-.auth-card__close {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
+.auth-gate__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.auth-gate__tabs {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.auth-tab {
   border: 1px solid var(--border);
   background: var(--bg-surface-soft);
   color: var(--text-secondary);
+  border-radius: 10px;
+  height: 38px;
+  font-weight: 700;
   cursor: pointer;
 }
 
-.auth-card__title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: 1.1rem;
-}
-
-.auth-card__sub {
-  margin: 6px 0 0;
-  color: var(--text-secondary);
-  font-size: 0.82rem;
+.auth-tab.active {
+  color: #fff;
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--purple-1), var(--purple-3));
 }
 
 .auth-form {
-  margin-top: 14px;
+  margin-top: 12px;
   display: grid;
   gap: 10px;
+}
+
+.auth-form--hidden {
+  display: none;
 }
 
 .auth-form__field {
@@ -1459,7 +1464,7 @@ input {
 
 .auth-feedback {
   min-height: 20px;
-  margin-top: 10px;
+  margin-top: 8px;
   font-size: 0.76rem;
   color: var(--text-muted);
 }

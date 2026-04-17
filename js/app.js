@@ -4,6 +4,7 @@
 
 let currentSignal = null;
 let lastSignalId = null;
+let pollingStarted = false;
 window._lastPriceDirection = null;
 window.__currentSignal = null;
 
@@ -40,14 +41,37 @@ async function boot() {
   const sbOk = API.initSupabase();
   if (!sbOk) console.warn('Supabase not loaded; running in price-only mode');
   if (sbOk) {
-    UI.initAuthModal(async (email, password) => API.signUpWithEmail(email, password));
+    UI.initAuthGate({
+      onLogin: async (email, password) => API.signInWithEmail(email, password),
+      onSignup: async (email, password) => API.signUpWithEmail(email, password),
+      onLogout: async () => API.signOutAuth(),
+      onAuthenticated: () => startPolling(),
+    });
+
     try {
       const session = await API.getCurrentSession();
-      UI.setAuthButtonUser(session?.user?.email || null);
+      if (session?.user?.email) {
+        UI.setAuthButtonUser(session.user.email);
+        UI.setAuthGateVisible(false);
+        startPolling();
+      } else {
+        UI.setAuthButtonUser(null);
+        UI.setAuthGateVisible(true);
+      }
     } catch (err) {
       console.warn('Session check failed:', err.message);
+      UI.setAuthGateVisible(true);
     }
   }
+
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
+}
+
+function startPolling() {
+  if (pollingStarted) return;
+  pollingStarted = true;
 
   pollPrice();
   pollSupabase();
@@ -56,10 +80,6 @@ async function boot() {
   setInterval(pollPrice, 30000);
   setInterval(pollSupabase, 30000);
   setInterval(pollDXY, 60000);
-
-  if ('Notification' in window && Notification.permission === 'default') {
-    Notification.requestPermission();
-  }
 }
 
 async function pollPrice() {

@@ -94,6 +94,26 @@ async function signUpWithEmail(email, password) {
   return data;
 }
 
+async function signInWithEmail(email, password) {
+  if (!supabaseClient) {
+    throw new Error('Supabase not initialized');
+  }
+
+  const { data, error } = await supabaseClient.auth.signInWithPassword({
+    email,
+    password,
+  });
+
+  if (error) throw error;
+  return data;
+}
+
+async function signOutAuth() {
+  if (!supabaseClient) return;
+  const { error } = await supabaseClient.auth.signOut();
+  if (error) throw error;
+}
+
 async function getCurrentSession() {
   if (!supabaseClient) return null;
   const { data, error } = await supabaseClient.auth.getSession();
@@ -376,6 +396,8 @@ async function fetchPerformanceStats() {
 window.API = {
   initSupabase,
   signUpWithEmail,
+  signInWithEmail,
+  signOutAuth,
   getCurrentSession,
   fetchLivePrice,
   fetchCandles,

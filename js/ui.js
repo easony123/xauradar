@@ -102,87 +102,122 @@ function initNavigation() {
 }
 
 function setAuthButtonUser(email) {
-  const btn = document.getElementById('auth-open-btn');
+  const btn = document.getElementById('auth-logout-btn');
   if (!btn) return;
-
   if (email) {
-    const short = email.length > 16 ? `${email.slice(0, 13)}...` : email;
+    const short = email.length > 18 ? `${email.slice(0, 15)}...` : email;
     btn.textContent = short;
     btn.classList.add('auth-trigger--active');
     btn.setAttribute('title', email);
-    btn.setAttribute('aria-label', `Signed in as ${email}`);
   } else {
-    btn.textContent = 'Sign up';
+    btn.textContent = 'Logout';
     btn.classList.remove('auth-trigger--active');
-    btn.setAttribute('title', 'Open sign up');
-    btn.setAttribute('aria-label', 'Open sign up');
+    btn.removeAttribute('title');
   }
 }
 
-function initAuthModal(onSignup) {
-  const modal = document.getElementById('auth-modal');
-  const openBtn = document.getElementById('auth-open-btn');
-  const closeBtn = document.getElementById('auth-close-btn');
-  const backdrop = document.getElementById('auth-modal-backdrop');
-  const form = document.getElementById('auth-signup-form');
-  const submitBtn = document.getElementById('auth-submit-btn');
-  const feedback = document.getElementById('auth-feedback');
-  const emailInput = document.getElementById('auth-email');
-  const passwordInput = document.getElementById('auth-password');
+function setAuthGateVisible(visible) {
+  const gate = document.getElementById('auth-gate');
+  const app = document.getElementById('app-shell');
+  if (!gate || !app) return;
 
-  if (!modal || !openBtn || !closeBtn || !backdrop || !form || !submitBtn || !feedback || !emailInput || !passwordInput) {
+  if (visible) {
+    gate.classList.remove('auth-gate--hidden');
+    app.classList.add('app-shell--hidden');
+  } else {
+    gate.classList.add('auth-gate--hidden');
+    app.classList.remove('app-shell--hidden');
+  }
+}
+
+function initAuthGate({ onLogin, onSignup, onLogout, onAuthenticated }) {
+  const loginTab = document.getElementById('auth-tab-login');
+  const signupTab = document.getElementById('auth-tab-signup');
+  const loginForm = document.getElementById('auth-login-form');
+  const signupForm = document.getElementById('auth-signup-form');
+  const feedback = document.getElementById('auth-feedback');
+  const logoutBtn = document.getElementById('auth-logout-btn');
+  const loginSubmit = document.getElementById('auth-login-submit');
+  const signupSubmit = document.getElementById('auth-signup-submit');
+
+  if (!loginTab || !signupTab || !loginForm || !signupForm || !feedback || !logoutBtn || !loginSubmit || !signupSubmit) {
     return;
   }
 
-  const open = () => {
-    modal.classList.add('is-open');
-    modal.setAttribute('aria-hidden', 'false');
+  const showTab = (tab) => {
+    const loginActive = tab === 'login';
+    loginTab.classList.toggle('active', loginActive);
+    signupTab.classList.toggle('active', !loginActive);
+    loginForm.classList.toggle('auth-form--hidden', !loginActive);
+    signupForm.classList.toggle('auth-form--hidden', loginActive);
     feedback.textContent = '';
-    setTimeout(() => emailInput.focus(), 20);
+    feedback.className = 'auth-feedback';
   };
 
-  const close = () => {
-    modal.classList.remove('is-open');
-    modal.setAttribute('aria-hidden', 'true');
-  };
+  loginTab.addEventListener('click', () => showTab('login'));
+  signupTab.addEventListener('click', () => showTab('signup'));
 
-  openBtn.addEventListener('click', open);
-  closeBtn.addEventListener('click', close);
-  backdrop.addEventListener('click', close);
-  document.addEventListener('keydown', (evt) => {
-    if (evt.key === 'Escape' && modal.classList.contains('is-open')) close();
+  loginForm.addEventListener('submit', async (evt) => {
+    evt.preventDefault();
+    const email = (document.getElementById('auth-login-email')?.value || '').trim();
+    const password = document.getElementById('auth-login-password')?.value || '';
+    if (!email || !password) return;
+
+    loginSubmit.disabled = true;
+    loginSubmit.textContent = 'Logging in...';
+    try {
+      const data = await onLogin(email, password);
+      const userEmail = data?.user?.email || data?.session?.user?.email || email;
+      setAuthButtonUser(userEmail);
+      setAuthGateVisible(false);
+      if (onAuthenticated) onAuthenticated();
+      feedback.textContent = '';
+      loginForm.reset();
+    } catch (err) {
+      feedback.textContent = err?.message || 'Login failed.';
+      feedback.className = 'auth-feedback auth-feedback--error';
+    } finally {
+      loginSubmit.disabled = false;
+      loginSubmit.textContent = 'Login';
+    }
   });
 
-  form.addEventListener('submit', async (evt) => {
+  signupForm.addEventListener('submit', async (evt) => {
     evt.preventDefault();
-    const email = emailInput.value.trim();
-    const password = passwordInput.value;
+    const email = (document.getElementById('auth-signup-email')?.value || '').trim();
+    const password = document.getElementById('auth-signup-password')?.value || '';
     if (!email || password.length < 8) {
       feedback.textContent = 'Use a valid email and password (minimum 8 chars).';
       feedback.className = 'auth-feedback auth-feedback--error';
       return;
     }
 
-    submitBtn.disabled = true;
-    submitBtn.textContent = 'Creating...';
-    feedback.textContent = '';
-
+    signupSubmit.disabled = true;
+    signupSubmit.textContent = 'Creating...';
     try {
       const result = await onSignup(email, password);
-      if (result?.session?.user?.email) {
-        setAuthButtonUser(result.session.user.email);
-        feedback.textContent = 'Account created and signed in.';
-      } else {
-        feedback.textContent = 'Account created. If email confirmation is still enabled in Supabase, disable it in Auth settings.';
-      }
-      feedback.className = 'auth-feedback auth-feedback--ok';
-      form.reset();
+      const userEmail = result?.session?.user?.email || email;
+      setAuthButtonUser(userEmail);
+      setAuthGateVisible(false);
+      if (onAuthenticated) onAuthenticated();
+      feedback.textContent = '';
+      signupForm.reset();
     } catch (err) {
       feedback.textContent = err?.message || 'Sign up failed.';
       feedback.className = 'auth-feedback auth-feedback--error';
     } finally {
-      submitBtn.disabled = false;
-      submitBtn.textContent = 'Sign up';
+      signupSubmit.disabled = false;
+      signupSubmit.textContent = 'Create account';
+    }
+  });
+
+  logoutBtn.addEventListener('click', async () => {
+    try {
+      await onLogout();
+      setAuthButtonUser(null);
+      setAuthGateVisible(true);
+    } catch (err) {
+      console.error('Logout failed', err?.message || err);
     }
   });
 }
@@ -708,7 +743,8 @@ function updateRiskCalc(signal) {
 window.UI = {
   initTheme,
   initNavigation,
-  initAuthModal,
+  initAuthGate,
+  setAuthGateVisible,
   setAuthButtonUser,
   updateSessionPill,
   updateHeaderPrice,

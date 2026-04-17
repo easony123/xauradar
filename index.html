@@ -32,7 +32,50 @@
     </symbol>
   </svg>
 
-  <div class="app-shell">
+  <section class="auth-gate" id="auth-gate">
+    <div class="auth-gate__panel">
+      <div class="auth-gate__brand">
+        <span class="brand__badge">XR</span>
+        <div>
+          <div class="brand__title">XAU Radar</div>
+          <div class="brand__sub">Sign in to continue</div>
+        </div>
+      </div>
+
+      <div class="auth-gate__tabs">
+        <button type="button" class="auth-tab active" id="auth-tab-login">Login</button>
+        <button type="button" class="auth-tab" id="auth-tab-signup">Sign up</button>
+      </div>
+
+      <form id="auth-login-form" class="auth-form auth-form--gate">
+        <label class="auth-form__field">
+          <span>Email</span>
+          <input id="auth-login-email" type="email" required autocomplete="email">
+        </label>
+        <label class="auth-form__field">
+          <span>Password</span>
+          <input id="auth-login-password" type="password" required autocomplete="current-password">
+        </label>
+        <button type="submit" class="auth-form__submit" id="auth-login-submit">Login</button>
+      </form>
+
+      <form id="auth-signup-form" class="auth-form auth-form--gate auth-form--hidden">
+        <label class="auth-form__field">
+          <span>Email</span>
+          <input id="auth-signup-email" type="email" required autocomplete="email">
+        </label>
+        <label class="auth-form__field">
+          <span>Password</span>
+          <input id="auth-signup-password" type="password" minlength="8" required autocomplete="new-password">
+        </label>
+        <button type="submit" class="auth-form__submit" id="auth-signup-submit">Create account</button>
+      </form>
+
+      <div id="auth-feedback" class="auth-feedback" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <div class="app-shell app-shell--hidden" id="app-shell">
     <aside class="sidebar" aria-label="Primary navigation">
       <div class="sidebar__brand">
         <span class="brand__badge">XR</span>
@@ -108,7 +151,7 @@
           </div>
           <div class="topbar__actions">
             <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">Dark</button>
-            <button type="button" class="auth-trigger" id="auth-open-btn" aria-label="Open sign up">Sign up</button>
+            <button type="button" class="auth-trigger" id="auth-logout-btn" aria-label="Logout">Logout</button>
           </div>
         </div>
       </header>
@@ -334,29 +377,6 @@
         </button>
       </nav>
     </main>
-  </div>
-
-  <div class="auth-modal" id="auth-modal" aria-hidden="true">
-    <div class="auth-modal__backdrop" id="auth-modal-backdrop"></div>
-    <section class="auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-      <button type="button" class="auth-card__close" id="auth-close-btn" aria-label="Close sign up">x</button>
-      <h2 class="auth-card__title" id="auth-title">Create account</h2>
-      <p class="auth-card__sub">Sign up with email and password.</p>
-
-      <form id="auth-signup-form" class="auth-form">
-        <label class="auth-form__field">
-          <span>Email</span>
-          <input id="auth-email" type="email" placeholder="you@example.com" required autocomplete="email">
-        </label>
-        <label class="auth-form__field">
-          <span>Password</span>
-          <input id="auth-password" type="password" placeholder="Minimum 8 characters" minlength="8" required autocomplete="new-password">
-        </label>
-        <button type="submit" class="auth-form__submit" id="auth-submit-btn">Sign up</button>
-      </form>
-
-      <div id="auth-feedback" class="auth-feedback" aria-live="polite"></div>
-    </section>
   </div>
 
   <script src="js/api.js"></script>
