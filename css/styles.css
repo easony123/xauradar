@@ -1902,6 +1902,39 @@ input {
   color: #8d9ab4;
 }
 
+.poly-topic-nav {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 4px;
+}
+
+.poly-topic {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: #7f93b6;
+  font-weight: 700;
+  font-size: 0.9rem;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
+.poly-topic.active {
+  color: #f4f8ff;
+}
+
+.poly-topic-nav::-webkit-scrollbar {
+  height: 4px;
+}
+
+.poly-topic-nav::-webkit-scrollbar-thumb {
+  background: rgba(108, 131, 173, 0.48);
+  border-radius: 999px;
+}
+
 .poly-overview-bar {
   border: 1px solid rgba(88, 108, 143, 0.38);
   border-radius: 16px;
@@ -2065,6 +2098,49 @@ input {
   color: #fff;
 }
 
+.poly-bet-tabs {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 8px;
+  padding-bottom: 2px;
+}
+
+.poly-bet-tabs::-webkit-scrollbar {
+  height: 4px;
+}
+
+.poly-bet-tabs::-webkit-scrollbar-thumb {
+  background: rgba(108, 131, 173, 0.48);
+  border-radius: 999px;
+}
+
+.poly-tabs button,
+.poly-bet-tabs button,
+.poly-view-nav button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.poly-bet-tab {
+  flex: 0 0 auto;
+  border: 1px solid rgba(63, 86, 124, 0.62);
+  border-radius: 10px;
+  background: rgba(11, 20, 34, 0.82);
+  color: #a8bbdc;
+  font-size: 0.76rem;
+  font-weight: 700;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+
+.poly-bet-tab.active {
+  border-color: rgba(37, 144, 255, 0.95);
+  background: rgba(13, 92, 156, 0.38);
+  color: #e8f4ff;
+}
+
 .poly-view-nav {
   margin-top: 8px;
   display: grid;
@@ -2142,7 +2218,7 @@ input {
 .polymarket-card {
   border: 1px solid rgba(70, 93, 134, 0.42);
   border-radius: 14px;
-  background: linear-gradient(180deg, rgba(10, 18, 30, 0.98), rgba(8, 14, 26, 0.98));
+  background: linear-gradient(180deg, rgba(26, 34, 45, 0.96), rgba(21, 29, 41, 0.96));
   padding: 12px;
   display: grid;
   gap: 8px;
@@ -2309,6 +2385,192 @@ input {
 @media (min-width: 920px) {
   .polymarket-market-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Polymarket design pass: stronger similarity with reference layout */
+.page--polymarket {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  grid-template-areas:
+    "overview"
+    "toolbar"
+    "tabs"
+    "bettabs"
+    "view"
+    "trend"
+    "markets";
+}
+
+.poly-overview-bar { grid-area: overview; }
+.poly-toolbar { grid-area: toolbar; }
+#polymarket-tabs { grid-area: tabs; }
+#polymarket-bet-tabs { grid-area: bettabs; }
+#polymarket-view-nav { grid-area: view; }
+#polymarket-trending-list { grid-area: trend; }
+#polymarket-markets-list { grid-area: markets; }
+
+.poly-topic {
+  border-radius: 9px;
+  padding: 7px 10px;
+}
+
+.poly-topic.active {
+  background: rgba(19, 38, 62, 0.9);
+}
+
+.poly-toolbar {
+  margin-top: 0;
+}
+
+.poly-view-nav {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.poly-view-tab {
+  border-radius: 12px;
+  font-size: 0.78rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.poly-view-tab::before {
+  font-size: 0.84rem;
+  line-height: 1;
+}
+
+.poly-view-tab[data-view="all"]::before { content: "▦"; }
+.poly-view-tab[data-view="active"]::before { content: "●"; }
+.poly-view-tab[data-view="ending"]::before { content: "◷"; }
+.poly-view-tab[data-view="resolved"]::before { content: "✓"; }
+
+.poly-view-tab.active {
+  border-color: rgba(58, 132, 255, 0.95);
+  background: linear-gradient(145deg, rgba(25, 100, 178, 0.6), rgba(20, 63, 121, 0.7));
+  color: #f4f8ff;
+}
+
+.polymarket-card {
+  border-radius: 16px;
+  border: 1px solid rgba(64, 89, 130, 0.55);
+  background:
+    linear-gradient(180deg, rgba(23, 31, 42, 0.98), rgba(18, 26, 37, 0.98));
+  padding: 14px;
+  gap: 10px;
+}
+
+.polymarket-card__head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.polymarket-card__asset {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 173, 46, 0.62);
+  background: linear-gradient(160deg, rgba(247, 161, 34, 0.92), rgba(199, 120, 16, 0.9));
+  color: #fff;
+  font-weight: 800;
+  font-size: 0.8rem;
+  display: grid;
+  place-items: center;
+}
+
+.polymarket-card__title-wrap {
+  min-width: 0;
+}
+
+.polymarket-card__catline {
+  margin-top: 3px;
+  font-size: 0.67rem;
+  color: #97afda;
+  font-weight: 700;
+}
+
+.polymarket-card__status {
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+  border: 1px solid rgba(74, 100, 143, 0.7);
+  background: rgba(16, 29, 48, 0.9);
+}
+
+.polymarket-card__status.status-active {
+  border-color: rgba(255, 87, 87, 0.7);
+  color: #ff6f6f;
+}
+
+.polymarket-card__status.status-closed {
+  border-color: rgba(255, 196, 107, 0.7);
+  color: #ffd897;
+}
+
+.polymarket-card__status.status-resolved {
+  border-color: rgba(103, 167, 255, 0.75);
+  color: #9cc8ff;
+}
+
+.poly-odd {
+  border-radius: 12px;
+  padding: 10px 11px;
+}
+
+.poly-prob-track {
+  height: 8px;
+}
+
+.polymarket-card__meta {
+  border-top: 1px solid rgba(63, 88, 124, 0.4);
+  padding-top: 8px;
+}
+
+@media (min-width: 1024px) {
+  .page--polymarket {
+    grid-template-columns: 230px minmax(0, 1fr);
+    grid-template-areas:
+      "overview overview"
+      "toolbar toolbar"
+      "tabs tabs"
+      "view bettabs"
+      "view trend"
+      "view markets";
+    gap: 14px;
+  }
+
+  .poly-view-nav {
+    grid-template-columns: 1fr;
+    align-content: start;
+    gap: 10px;
+    border: 1px solid rgba(63, 89, 131, 0.44);
+    border-radius: 14px;
+    background: rgba(12, 20, 34, 0.88);
+    padding: 10px;
+    height: fit-content;
+    position: sticky;
+    top: 88px;
+  }
+
+  .poly-view-tab {
+    width: 100%;
+    justify-content: flex-start;
+    text-align: left;
+    padding: 11px 12px;
+  }
+
+  .polymarket-market-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1480px) {
+  .polymarket-market-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
