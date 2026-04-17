@@ -3,14 +3,49 @@
  */
 
 let currentSignal = null;
-let lastSignalId = null;
+let latestDecisionRun = null;
+let currentSignalsByLane = { intraday: null, swing: null };
+let lastSignalIdsByLane = { intraday: null, swing: null };
 let pollingStarted = false;
 let demoBootstrapped = false;
 let lastXauPriceData = null;
 let lastPolymarketBtc = null;
 let lastPolymarketMarkets = [];
+let lastSignalHistory = [];
+let lastIndicatorSnapshot = null;
+let lastRiskState = null;
 window._lastPriceDirection = null;
 window.__currentSignal = null;
+
+function normalizeLane(lane) {
+  return String(lane || 'intraday').toLowerCase() === 'swing' ? 'swing' : 'intraday';
+}
+
+function getSelectedLane() {
+  const fromUi = typeof UI.getSelectedSignalLane === 'function' ? UI.getSelectedSignalLane() : null;
+  return normalizeLane(fromUi || 'intraday');
+}
+
+function resolveSignalForLane(lane = getSelectedLane()) {
+  const key = normalizeLane(lane);
+  return currentSignalsByLane[key] || latestDecisionRun?.lanes?.[key] || null;
+}
+
+function renderSignalDashboard() {
+  const selectedLane = getSelectedLane();
+  const signal = resolveSignalForLane(selectedLane);
+  currentSignal = signal;
+  window.__currentSignal = signal;
+
+  UI.renderSignalHero(latestDecisionRun, currentSignalsByLane, lastXauPriceData?.price);
+  UI.renderLevels(signal, lastXauPriceData?.price);
+  UI.renderConditions(latestDecisionRun, lastIndicatorSnapshot, selectedLane);
+  UI.updateRiskCalc(signal, lastRiskState);
+
+  if (window.Chart && window.Chart.isInitialized()) {
+    window.Chart.drawSignalOverlay(signal);
+  }
+}
 
 function deriveStatsFromHistory(signals) {
   if (!signals || signals.length === 0) return null;
@@ -50,23 +85,38 @@ async function boot() {
       UI.renderPolymarketDashboard(lastPolymarketBtc, lastPolymarketMarkets);
     } else if (lastXauPriceData) {
       UI.updateHeaderPrice(lastXauPriceData);
+      renderSignalDashboard();
     }
+  });
+
+  window.addEventListener('xauradar:signal-lane-change', () => {
+    renderSignalDashboard();
   });
 
   setInterval(UI.updateSessionPill, 30000);
 
   const sbOk = API.initSupabase();
-  if (!sbOk) console.warn('Supabase not loaded; running in price-only mode');
+  if (!sbOk) console.warn('Supabase not loaded; auth and DB features unavailable until SDK loads');
+
+  const authUnavailableError = 'Auth is unavailable right now (Supabase SDK not loaded). Refresh page and disable script/ad blockers for this site.';
+  UI.initAuthGate({
+    onLogin: async (email, password) => {
+      if (!sbOk) throw new Error(authUnavailableError);
+      return API.signInWithEmail(email, password);
+    },
+    onSignup: async (email, password) => {
+      if (!sbOk) throw new Error(authUnavailableError);
+      return API.signUpWithEmail(email, password);
+    },
+    onLogout: async () => {
+      if (!sbOk) return;
+      await API.signOutAuth();
+      demoBootstrapped = false;
+    },
+    onAuthenticated: () => handleAuthenticated(),
+  });
+
   if (sbOk) {
-    UI.initAuthGate({
-      onLogin: async (email, password) => API.signInWithEmail(email, password),
-      onSignup: async (email, password) => API.signUpWithEmail(email, password),
-      onLogout: async () => {
-        await API.signOutAuth();
-        demoBootstrapped = false;
-      },
-      onAuthenticated: () => handleAuthenticated(),
-    });
 
     UI.initDemoControls({
       onToggleAutoTrade: async (enabled) => API.setDemoAutoTrade(enabled),
@@ -88,6 +138,9 @@ async function boot() {
       console.warn('Session check failed:', err.message);
       UI.setAuthGateVisible(true);
     }
+  } else {
+    UI.setAuthButtonUser(null);
+    UI.setAuthGateVisible(true);
   }
 
   if ('Notification' in window && Notification.permission === 'default') {
@@ -129,12 +182,9 @@ async function pollPrice() {
   lastXauPriceData = data;
   if (UI.getDashboardMode() === 'xau') {
     UI.updateHeaderPrice(data);
+    renderSignalDashboard();
   }
   window._lastPriceDirection = data.direction;
-
-  if (currentSignal) {
-    UI.renderLevels(currentSignal, data.price);
-  }
 }
 
 async function pollPolymarket() {
@@ -153,8 +203,9 @@ async function pollPolymarket() {
 
 async function pollSupabase() {
   try {
-    const [signal, history, snapshot, events, stats, riskState, demoPerformance] = await Promise.all([
-      API.fetchActiveSignal(),
+    const [decisionRun, activeSignalsByLane, history, snapshot, events, stats, riskState, demoPerformance] = await Promise.all([
+      API.fetchLatestDecisionRun(),
+      API.fetchActiveSignalsByLane(),
       API.fetchSignalHistory(30),
       API.fetchIndicatorSnapshot(),
       API.fetchUpcomingEvents(),
@@ -163,30 +214,37 @@ async function pollSupabase() {
       API.fetchDemoPerformance(),
     ]);
 
-    currentSignal = signal;
-    window.__currentSignal = signal;
+    latestDecisionRun = decisionRun;
+    currentSignalsByLane = {
+      intraday: activeSignalsByLane?.intraday || null,
+      swing: activeSignalsByLane?.swing || null,
+    };
+    lastSignalHistory = history || [];
+    lastIndicatorSnapshot = snapshot;
+    lastRiskState = riskState;
 
-    UI.renderSignalHero(signal);
-    UI.renderLevels(signal);
-    if (window.Chart && window.Chart.isInitialized()) {
-      window.Chart.drawSignalOverlay(signal);
-    }
-
-    if (signal && signal.id !== lastSignalId) {
-      if (lastSignalId !== null && String(signal.status || '').toUpperCase() === 'ACTIVE') {
-        fireAlert(signal);
+    ['intraday', 'swing'].forEach((lane) => {
+      const signal = currentSignalsByLane[lane];
+      if (signal?.id) {
+        if (lastSignalIdsByLane[lane] && lastSignalIdsByLane[lane] !== signal.id) {
+          fireAlert(signal);
+        }
+        lastSignalIdsByLane[lane] = signal.id;
       }
-      lastSignalId = signal.id;
-      UI.updateRiskCalc(signal, riskState);
-    }
-    if (!signal) UI.updateRiskCalc(null, riskState);
+    });
 
-    UI.renderConditions(signal, snapshot, history);
+    renderSignalDashboard();
+
     UI.renderNewsBanner(events);
     UI.renderEvents(events);
     UI.renderHistory(history);
     UI.renderStats(stats || deriveStatsFromHistory(history));
-    UI.renderDemoDashboard(demoPerformance, demoPerformance?.equityPoints || [], demoPerformance?.trades || []);
+    UI.renderDemoDashboard(
+      demoPerformance,
+      demoPerformance?.equityPoints || [],
+      demoPerformance?.trades || [],
+      demoPerformance?.events || []
+    );
   } catch (err) {
     console.error('Supabase poll error:', err.message);
   }

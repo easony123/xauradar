@@ -772,6 +772,106 @@ input {
   background: rgba(243, 177, 77, 0.1);
 }
 
+.signal-hero-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.signal-lane-card {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(12, 16, 28, 0.2);
+  border-radius: 24px;
+  padding: 16px;
+  color: #fff;
+  text-align: left;
+  display: grid;
+  gap: 10px;
+  cursor: pointer;
+  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+
+.signal-lane-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.signal-lane-card.is-selected {
+  border-color: rgba(255, 255, 255, 0.5);
+  box-shadow: 0 18px 40px rgba(33, 13, 89, 0.28);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.signal-lane-card--empty {
+  opacity: 0.9;
+}
+
+.signal-lane-card__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.signal-lane-card__state {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.signal-lane-card__side {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-height: 40px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.signal-lane-card__side.buy {
+  background: rgba(31, 202, 119, 0.18);
+  color: #d2ffe8;
+}
+
+.signal-lane-card__side.sell {
+  background: rgba(239, 93, 108, 0.18);
+  color: #ffe0e4;
+}
+
+.signal-lane-card__side.waiting {
+  background: rgba(255, 255, 255, 0.16);
+  color: rgba(255, 255, 255, 0.94);
+}
+
+.signal-lane-card__headline {
+  font-size: 1rem;
+  font-weight: 800;
+}
+
+.signal-lane-card__reason {
+  font-size: 0.84rem;
+  color: rgba(255, 255, 255, 0.92);
+  min-height: 2.4em;
+}
+
+.signal-lane-card__metrics {
+  display: grid;
+  gap: 8px;
+}
+
+.signal-lane-card__meta,
+.signal-lane-card__time {
+  font-size: 0.76rem;
+  color: rgba(255, 255, 255, 0.82);
+}
+
 .pulse-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1643,6 +1743,15 @@ input {
 }
 
 @media (max-width: 719px) {
+  .signal-hero-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .signal-lane-card {
+    padding: 14px;
+    border-radius: 20px;
+  }
+
   .topbar {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
@@ -2092,8 +2201,11 @@ input {
   display: flex;
   flex-wrap: nowrap;
   overflow-x: auto;
+  overflow-y: hidden;
   gap: 8px;
-  padding-bottom: 2px;
+  padding-bottom: 6px;
+  align-items: stretch;
+  scrollbar-width: thin;
 }
 
 .poly-tabs::-webkit-scrollbar {
@@ -2119,6 +2231,13 @@ input {
   -webkit-appearance: none;
   appearance: none;
   box-shadow: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  line-height: 1.15;
+  white-space: nowrap;
+  min-width: max-content;
 }
 
 .poly-tab.active {
@@ -2132,8 +2251,11 @@ input {
   display: flex;
   flex-wrap: nowrap;
   overflow-x: auto;
+  overflow-y: hidden;
   gap: 8px;
-  padding-bottom: 2px;
+  padding-bottom: 6px;
+  align-items: stretch;
+  scrollbar-width: thin;
 }
 
 .poly-bet-tabs::-webkit-scrollbar {
@@ -2165,6 +2287,13 @@ input {
   -webkit-appearance: none;
   appearance: none;
   box-shadow: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  line-height: 1.15;
+  white-space: nowrap;
+  min-width: max-content;
 }
 
 .poly-bet-tab.active {
@@ -2192,6 +2321,12 @@ input {
   -webkit-appearance: none;
   appearance: none;
   box-shadow: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  line-height: 1.15;
+  white-space: nowrap;
 }
 
 .poly-view-tab.active {
@@ -2425,35 +2560,49 @@ input {
 
 @media (min-width: 1024px) {
   .page--polymarket {
-    grid-template-columns: 230px minmax(0, 1fr);
+    grid-template-columns: 1fr;
     grid-template-areas:
-      "overview overview"
-      "toolbar toolbar"
-      "diagnostics diagnostics"
-      "tabs tabs"
-      "view bettabs"
-      "view trend"
-      "view markets";
+      "overview"
+      "toolbar"
+      "diagnostics"
+      "tabs"
+      "bettabs"
+      "view"
+      "trend"
+      "markets";
     gap: 14px;
   }
 
+  .poly-tabs,
+  .poly-bet-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 6px;
+  }
+
+  .poly-tab,
+  .poly-bet-tab {
+    min-height: 40px;
+    padding: 9px 14px;
+    font-size: 0.78rem;
+  }
+
   .poly-view-nav {
-    grid-template-columns: 1fr;
-    align-content: start;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    align-content: stretch;
     gap: 10px;
     border: 1px solid rgba(63, 89, 131, 0.44);
     border-radius: 14px;
     background: rgba(12, 20, 34, 0.88);
     padding: 10px;
-    height: fit-content;
-    position: sticky;
-    top: 88px;
+    position: static;
   }
 
   .poly-view-tab {
     width: 100%;
-    justify-content: flex-start;
-    text-align: left;
+    justify-content: center;
+    text-align: center;
     padding: 11px 12px;
   }
 }

@@ -91,6 +91,74 @@ function normalizeSnapshot(snapshot) {
   };
 }
 
+function normalizeDecisionCandidate(candidate, lane = 'intraday') {
+  const raw = tryParseJson(candidate);
+  if (!raw || typeof raw !== 'object') return null;
+
+  const normalized = normalizeSignal({
+    ...raw,
+    id: raw.signal_id || raw.id || null,
+    lane: raw.lane || lane,
+    type: raw.type || raw.signal_type || null,
+    sl: raw.sl ?? raw.stop_loss ?? null,
+    conditions_met: tryParseJson(raw.conditions_met) || {},
+    score_breakdown: tryParseJson(raw.score_breakdown) || {},
+    news_context: tryParseJson(raw.news_context) || {},
+    risk_context: tryParseJson(raw.risk_context) || {},
+  }) || {};
+
+  return {
+    ...normalized,
+    id: raw.signal_id || raw.id || null,
+    signal_id: raw.signal_id || raw.id || null,
+    lane: raw.lane || lane,
+    decision_state: raw.decision_state || 'NOT_READY',
+    selected_side: raw.selected_side || raw.type || normalized.type || null,
+    selected_signal_id: raw.selected_signal_id || raw.signal_id || raw.id || null,
+    reason: raw.reason || raw.decision_reason || raw.blocked_reason || '',
+    market_price: parseNumber(raw.market_price, NaN),
+    h1_regime: raw.h1_regime || normalized?.conditions_met?.adaptive_exits?.regime || null,
+  };
+}
+
+function normalizeDecisionLane(decision, lane = 'intraday') {
+  const raw = tryParseJson(decision);
+  const normalized = normalizeDecisionCandidate(raw, lane) || {
+    lane,
+    type: 'WAIT',
+    decision_state: 'NOT_READY',
+    status: 'REJECTED',
+    conditions_met: {},
+    score_breakdown: {},
+    news_context: {},
+    risk_context: {},
+  };
+
+  const candidateMap = (raw && typeof raw === 'object' && raw.candidates && typeof raw.candidates === 'object')
+    ? raw.candidates
+    : {};
+
+  return {
+    ...normalized,
+    lane,
+    candidates: {
+      buy: normalizeDecisionCandidate(candidateMap.buy, lane),
+      sell: normalizeDecisionCandidate(candidateMap.sell, lane),
+    },
+  };
+}
+
+function normalizeDecisionRun(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    lanes: {
+      intraday: normalizeDecisionLane(row.intraday_decision, 'intraday'),
+      swing: normalizeDecisionLane(row.swing_decision, 'swing'),
+    },
+  };
+}
+
 /**
  * Initialize Supabase client.
  */
@@ -400,12 +468,72 @@ async function fetchActiveSignal() {
   }
 }
 
+async function fetchActiveSignalsByLane() {
+  if (!supabaseClient) return {};
+  try {
+    const { data, error } = await supabaseClient
+      .from('signals')
+      .select('*')
+      .eq('status', 'ACTIVE')
+      .order('created_at', { ascending: false })
+      .limit(10);
+
+    if (error) throw error;
+    const out = {};
+    (data || []).forEach((row) => {
+      const lane = String(row.lane || 'intraday').toLowerCase();
+      if (!out[lane]) out[lane] = normalizeSignal(row);
+    });
+    return out;
+  } catch (err) {
+    console.error('Active signals by lane fetch error:', err.message);
+    return {};
+  }
+}
+
+async function fetchLatestDecisionRun() {
+  if (!supabaseClient) return null;
+  try {
+    const { data, error } = await supabaseClient
+      .from('signal_decision_runs')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (error) throw error;
+    return data && data.length > 0 ? normalizeDecisionRun(data[0]) : null;
+  } catch (err) {
+    console.error('Decision run fetch error:', err.message);
+    return null;
+  }
+}
+
+async function fetchLatestLaneHistory(lane = 'intraday', limit = 20) {
+  if (!supabaseClient) return [];
+  try {
+    const { data, error } = await supabaseClient
+      .from('signals')
+      .select('*')
+      .eq('lane', lane)
+      .neq('status', 'REJECTED')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error) throw error;
+    return (data || []).map(normalizeSignal);
+  } catch (err) {
+    console.error('Lane history fetch error:', err.message);
+    return [];
+  }
+}
+
 async function fetchSignalHistory(limit = 20) {
   if (!supabaseClient) return [];
   try {
     const { data, error } = await supabaseClient
       .from('signals')
       .select('*')
+      .neq('status', 'REJECTED')
       .order('created_at', { ascending: false })
       .limit(limit);
 
@@ -673,6 +801,26 @@ async function fetchDemoTrades(limit = 30) {
   }
 }
 
+async function fetchDemoTradeEvents(limit = 120) {
+  if (!supabaseClient) return [];
+  const user = await getCurrentUser();
+  if (!user?.id) return [];
+
+  try {
+    const { data, error } = await supabaseClient
+      .from('demo_trade_events')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) throw error;
+    return data || [];
+  } catch (err) {
+    console.error('Demo trade events fetch error:', err.message);
+    return [];
+  }
+}
+
 async function fetchDemoEquityCurve(limit = 220) {
   if (!supabaseClient) return [];
   const user = await getCurrentUser();
@@ -730,10 +878,11 @@ async function resetDemoAccount() {
 }
 
 async function fetchDemoPerformance() {
-  const [account, trades, equityPoints] = await Promise.all([
+  const [account, trades, equityPoints, events] = await Promise.all([
     fetchDemoAccount(),
     fetchDemoTrades(250),
     fetchDemoEquityCurve(500),
+    fetchDemoTradeEvents(250),
   ]);
 
   if (!account) return null;
@@ -801,6 +950,7 @@ async function fetchDemoPerformance() {
     laneStats,
     equityPoints: points,
     trades,
+    events,
   };
 }
 
@@ -813,6 +963,7 @@ window.API = {
   ensureDemoAccount,
   fetchDemoAccount,
   fetchDemoTrades,
+  fetchDemoTradeEvents,
   fetchDemoPerformance,
   fetchDemoEquityCurve,
   setDemoAutoTrade,
@@ -823,6 +974,9 @@ window.API = {
   fetchDXYPrice,
   fetchLatestBtcTick,
   fetchPolymarketMarkets,
+  fetchLatestDecisionRun,
+  fetchActiveSignalsByLane,
+  fetchLatestLaneHistory,
   fetchActiveSignal,
   fetchSignalHistory,
   fetchIndicatorSnapshot,

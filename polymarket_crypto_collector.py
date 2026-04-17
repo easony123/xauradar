@@ -23,6 +23,21 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "").strip()
 POLYMARKET_BASE_URL = (os.getenv("POLYMARKET_BASE_URL") or "https://gamma-api.polymarket.com").rstrip("/")
+TOP_MARKETS_LIMIT = int(os.getenv("POLYMARKET_TOP_MARKETS_LIMIT", "15") or "15")
+COMMODITIES_EVENTS_LIMIT = int(os.getenv("POLYMARKET_COMMODITIES_EVENTS_LIMIT", "120") or "120")
+RECENT_MARKETS_LIMIT = int(os.getenv("POLYMARKET_RECENT_MARKETS_LIMIT", "30") or "30")
+
+CATEGORY_PRIORITY = {
+    "xauusd": 80,
+    "oil": 75,
+    "geopolitics": 70,
+    "politics": 65,
+    "finance": 60,
+    "breaking": 50,
+    "new": 45,
+    "trending": 40,
+    "other": 0,
+}
 
 def parse_num(value: Any) -> float | None:
     try:
@@ -73,15 +88,11 @@ def normalize_probability(raw: Any, fallback_yes_price: float | None) -> float |
     return None
 
 
-def classify_category(text: str) -> str:
+def classify_content_category(text: str) -> str:
     t = text.lower()
-    if re.search(r"\b(trending|trend)\b", t):
-        return "trending"
     if re.search(r"\b(breaking|headline|urgent)\b", t):
         return "breaking"
-    if re.search(r"\b(new|latest|fresh)\b", t):
-        return "new"
-    if re.search(r"\b(gold|xau|xauusd|bullion|precious metal)\b", t):
+    if re.search(r"\b(xauusd|xau|spot gold|gold price|bullion|precious metal)\b", t):
         return "xauusd"
     if re.search(r"\b(oil|brent|wti|crude|opec|energy)\b", t):
         return "oil"
@@ -92,6 +103,17 @@ def classify_category(text: str) -> str:
     if re.search(r"\b(finance|financial|fomc|fed|powell|rate cut|rate hike|interest rate|us rates|cpi|pce|nfp|inflation|gdp|economy|tariff|yield|stocks|nasdaq|dow|s&p|bond|dollar|usd|bitcoin|btc|ethereum|eth|solana|crypto|token|coin|doge|memecoin|altcoin|defi|etf)\b", t):
         return "finance"
     return "other"
+
+
+def choose_display_category(text: str, source_tag: str, raw_category: str = "") -> str:
+    content = classify_content_category(f"{raw_category} {text}")
+    if content in {"xauusd", "oil", "politics", "finance", "geopolitics", "breaking"}:
+        return content
+    if source_tag == "recent":
+        return "new"
+    if source_tag == "top":
+        return "trending"
+    return content
 
 
 def slugify(text: str) -> str:
@@ -147,7 +169,7 @@ def fetch_btc_tick() -> dict[str, Any] | None:
     }
 
 
-def normalize_market_row(row: dict[str, Any]) -> dict[str, Any] | None:
+def normalize_market_row(row: dict[str, Any], source_tag: str = "top") -> dict[str, Any] | None:
     title = str(row.get("question") or row.get("title") or row.get("name") or "").strip()
     if not title:
         return None
@@ -185,7 +207,7 @@ def normalize_market_row(row: dict[str, Any]) -> dict[str, Any] | None:
         ]
     )
     raw_category = str(row.get("category") or "").strip().lower() or "other"
-    display_category = classify_category(context_blob)
+    display_category = choose_display_category(context_blob, source_tag, raw_category)
 
     slug = str(row.get("slug") or row.get("market_slug") or row.get("id") or "").strip()
     if not slug:
@@ -215,33 +237,133 @@ def normalize_market_row(row: dict[str, Any]) -> dict[str, Any] | None:
             "outcomes": row.get("outcomes"),
             "raw_category": raw_category,
             "display_category": display_category,
+            "collector_source": source_tag,
         },
     }
 
 
-def fetch_polymarket_markets() -> list[dict[str, Any]]:
-    params = {"active": "true", "closed": "false", "limit": "1000"}
+def _fetch_json(path: str, params: dict[str, Any]) -> Any:
     try:
-        resp = requests.get(f"{POLYMARKET_BASE_URL}/markets", params=params, timeout=14)
+        resp = requests.get(f"{POLYMARKET_BASE_URL}{path}", params=params, timeout=18)
         resp.raise_for_status()
-        data = resp.json()
+        return resp.json()
     except Exception as exc:
-        print(f"ERROR Polymarket request: {exc}")
-        return []
+        print(f"ERROR Polymarket request {path}: {exc}")
+        return None
 
+
+def fetch_top_volume_markets() -> list[dict[str, Any]]:
+    data = _fetch_json(
+        "/markets",
+        {
+            "active": "true",
+            "closed": "false",
+            "order": "volumeNum",
+            "ascending": "false",
+            "limit": str(TOP_MARKETS_LIMIT),
+        },
+    )
     if not isinstance(data, list):
         return []
-
-    normalized = []
+    rows: list[dict[str, Any]] = []
     for item in data:
         if not isinstance(item, dict):
             continue
-        row = normalize_market_row(item)
+        row = normalize_market_row(item, "top")
         if row:
-            normalized.append(row)
+            rows.append(row)
+    return rows
 
-    normalized.sort(key=lambda r: float(r.get("volume", 0) or 0) + float(r.get("liquidity", 0) or 0), reverse=True)
-    return normalized
+
+def fetch_recent_markets() -> list[dict[str, Any]]:
+    data = _fetch_json(
+        "/markets",
+        {
+            "active": "true",
+            "closed": "false",
+            "order": "createdAt",
+            "ascending": "false",
+            "limit": str(RECENT_MARKETS_LIMIT),
+        },
+    )
+    if not isinstance(data, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        row = normalize_market_row(item, "recent")
+        if row:
+            rows.append(row)
+    return rows
+
+
+def fetch_commodity_event_markets() -> list[dict[str, Any]]:
+    data = _fetch_json(
+        "/events",
+        {
+            "tag_slug": "commodities",
+            "closed": "false",
+            "limit": str(COMMODITIES_EVENTS_LIMIT),
+        },
+    )
+    if not isinstance(data, list):
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for event in data:
+        if not isinstance(event, dict):
+            continue
+        event_context = " ".join(
+            str(v or "")
+            for v in [
+                event.get("title"),
+                event.get("question"),
+                event.get("slug"),
+                event.get("description"),
+                "commodities",
+            ]
+        )
+        markets = event.get("markets")
+        if not isinstance(markets, list):
+            continue
+        for market in markets:
+            if not isinstance(market, dict):
+                continue
+            merged = {
+                **market,
+                "category": market.get("category") or event.get("category") or "commodities",
+                "description": f"{market.get('description', '')} {event_context}".strip(),
+            }
+            row = normalize_market_row(merged, "commodity")
+            if row and row.get("meta", {}).get("display_category") in {"xauusd", "oil"}:
+                rows.append(row)
+    return rows
+
+
+def merge_markets(*market_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for market_list in market_lists:
+        for row in market_list:
+            slug = str(row.get("market_slug") or "").strip()
+            if not slug:
+                continue
+            display_category = str((row.get("meta") or {}).get("display_category") or "other")
+            existing = merged.get(slug)
+            if not existing:
+                merged[slug] = row
+                continue
+            existing_display = str((existing.get("meta") or {}).get("display_category") or "other")
+            if CATEGORY_PRIORITY.get(display_category, 0) > CATEGORY_PRIORITY.get(existing_display, 0):
+                merged[slug] = row
+                continue
+            existing_volume = parse_num(existing.get("volume")) or 0.0
+            new_volume = parse_num(row.get("volume")) or 0.0
+            if new_volume > existing_volume:
+                merged[slug] = row
+    output = list(merged.values())
+    output.sort(key=lambda r: float(r.get("volume", 0) or 0) + float(r.get("liquidity", 0) or 0), reverse=True)
+    return output
 
 
 def main() -> int:
@@ -251,7 +373,10 @@ def main() -> int:
 
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     btc_tick = fetch_btc_tick()
-    markets = fetch_polymarket_markets()
+    top_markets = fetch_top_volume_markets()
+    recent_markets = fetch_recent_markets()
+    commodity_markets = fetch_commodity_event_markets()
+    markets = merge_markets(top_markets, recent_markets, commodity_markets)
 
     if btc_tick:
         try:
@@ -267,7 +392,10 @@ def main() -> int:
         try:
             supabase.table("polymarket_markets").delete().neq("market_slug", "").execute()
             supabase.table("polymarket_markets").upsert(markets, on_conflict="market_slug").execute()
-            print(f"Upserted Polymarket markets: {len(markets)}")
+            print(
+                "Upserted Polymarket markets:"
+                f" {len(markets)} (top={len(top_markets)}, recent={len(recent_markets)}, commodities={len(commodity_markets)})"
+            )
         except Exception as exc:
             print(f"ERROR writing polymarket_markets: {exc}")
             return 1

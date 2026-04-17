@@ -30,6 +30,20 @@ const SERVICE_ROLE_KEY = Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPAB
 const POLYMARKET_COLLECTOR_CRON_SECRET = Deno.env.get("POLYMARKET_COLLECTOR_CRON_SECRET") ?? "";
 const COINGECKO_API_KEY = Deno.env.get("COINGECKO_API_KEY") ?? "";
 const POLYMARKET_BASE_URL = Deno.env.get("POLYMARKET_BASE_URL") ?? "https://gamma-api.polymarket.com";
+const TOP_MARKETS_LIMIT = Number(Deno.env.get("POLYMARKET_TOP_MARKETS_LIMIT") ?? 15) || 15;
+const COMMODITIES_EVENTS_LIMIT = Number(Deno.env.get("POLYMARKET_COMMODITIES_EVENTS_LIMIT") ?? 120) || 120;
+const RECENT_MARKETS_LIMIT = Number(Deno.env.get("POLYMARKET_RECENT_MARKETS_LIMIT") ?? 30) || 30;
+const CATEGORY_PRIORITY: Record<string, number> = {
+  xauusd: 80,
+  oil: 75,
+  geopolitics: 70,
+  politics: 65,
+  finance: 60,
+  breaking: 50,
+  new: 45,
+  trending: 40,
+  other: 0,
+};
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -75,17 +89,23 @@ function normalizeProbability(raw: unknown, fallbackPrice: number | null): numbe
   return fallbackPrice !== null ? fallbackPrice * 100 : null;
 }
 
-function classifyCategory(text: string): string {
+function classifyContentCategory(text: string): string {
   const t = text.toLowerCase();
-  if (/\b(trending|trend)\b/.test(t)) return "trending";
   if (/\b(breaking|headline|urgent)\b/.test(t)) return "breaking";
-  if (/\b(new|latest|fresh)\b/.test(t)) return "new";
-  if (/\b(gold|xau|xauusd|bullion|precious metal)\b/.test(t)) return "xauusd";
+  if (/\b(xauusd|xau|spot gold|gold price|bullion|precious metal)\b/.test(t)) return "xauusd";
   if (/\b(oil|brent|wti|crude|opec|energy)\b/.test(t)) return "oil";
   if (/\b(politics|election|president|senate|congress|minister|government|white house|parliament|trump|biden)\b/.test(t)) return "politics";
   if (/\b(war|ukraine|russia|israel|gaza|taiwan|geopolitic|missile|sanction|ceasefire|conflict|putin|xi jinping|iran|nato|military)\b/.test(t)) return "geopolitics";
   if (/\b(finance|financial|fomc|fed|powell|rate cut|rate hike|interest rate|us rates|cpi|pce|nfp|inflation|gdp|economy|tariff|yield|stocks|nasdaq|dow|s&p|bond|dollar|usd|bitcoin|btc|ethereum|eth|solana|crypto|token|coin|doge|memecoin|altcoin|defi|etf)\b/.test(t)) return "finance";
   return "other";
+}
+
+function chooseDisplayCategory(text: string, sourceTag: string, rawCategory = ""): string {
+  const content = classifyContentCategory(`${rawCategory} ${text}`);
+  if (["xauusd", "oil", "politics", "finance", "geopolitics", "breaking"].includes(content)) return content;
+  if (sourceTag === "recent") return "new";
+  if (sourceTag === "top") return "trending";
+  return content;
 }
 
 function slugify(value: string): string {
@@ -135,7 +155,7 @@ async function fetchBtcTick(): Promise<BtcTick | null> {
   }
 }
 
-function normalizePolymarketRow(row: Record<string, unknown>): PolymarketRow | null {
+function normalizePolymarketRow(row: Record<string, unknown>, sourceTag = "top"): PolymarketRow | null {
   const title = String(row.question ?? row.title ?? row.name ?? "").trim();
   if (!title) return null;
 
@@ -160,14 +180,14 @@ function normalizePolymarketRow(row: Record<string, unknown>): PolymarketRow | n
   }).join(" ");
 
   const rawCategory = String(row.category ?? "").trim().toLowerCase() || "other";
-  const displayCategory = classifyCategory([
+  const displayCategory = chooseDisplayCategory([
     title,
     String(row.description ?? ""),
     rawCategory,
     String(row.series ?? ""),
     String(row.topic ?? ""),
     tagText,
-  ].join(" "));
+  ].join(" "), sourceTag, rawCategory);
 
   const slugRaw = String(row.slug ?? row.market_slug ?? row.id ?? "").trim();
   const marketSlug = slugRaw || `${displayCategory}-${slugify(title)}`;
@@ -195,35 +215,113 @@ function normalizePolymarketRow(row: Record<string, unknown>): PolymarketRow | n
       outcomes: row.outcomes ?? null,
       raw_category: rawCategory,
       display_category: displayCategory,
+      collector_source: sourceTag,
     },
   };
 }
 
-async function fetchPolymarketRows(): Promise<PolymarketRow[]> {
-  const url = new URL(`${POLYMARKET_BASE_URL.replace(/\/$/, "")}/markets`);
-  url.searchParams.set("active", "true");
-  url.searchParams.set("closed", "false");
-  url.searchParams.set("limit", "1000");
+async function fetchJson(path: string, params: Record<string, string>): Promise<unknown> {
+  const url = new URL(`${POLYMARKET_BASE_URL.replace(/\/$/, "")}${path}`);
+  Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
 
   try {
     const resp = await fetch(url);
     if (!resp.ok) {
-      console.error("Polymarket HTTP error:", resp.status);
-      return [];
+      console.error(`Polymarket HTTP error ${path}:`, resp.status);
+      return null;
     }
-    const data = await resp.json();
-    if (!Array.isArray(data)) return [];
-
-    const normalized = data
-      .map((item) => normalizePolymarketRow(item as Record<string, unknown>))
-      .filter((item): item is PolymarketRow => item !== null);
-
-    normalized.sort((a, b) => ((b.volume ?? 0) + (b.liquidity ?? 0)) - ((a.volume ?? 0) + (a.liquidity ?? 0)));
-    return normalized;
+    return await resp.json();
   } catch (err) {
-    console.error("Polymarket request failed:", err);
-    return [];
+    console.error(`Polymarket request failed ${path}:`, err);
+    return null;
   }
+}
+
+async function fetchTopVolumeMarkets(): Promise<PolymarketRow[]> {
+  const data = await fetchJson("/markets", {
+    active: "true",
+    closed: "false",
+    order: "volumeNum",
+    ascending: "false",
+    limit: String(TOP_MARKETS_LIMIT),
+  });
+  if (!Array.isArray(data)) return [];
+  return data
+    .map((item) => normalizePolymarketRow(item as Record<string, unknown>, "top"))
+    .filter((item): item is PolymarketRow => item !== null);
+}
+
+async function fetchRecentMarkets(): Promise<PolymarketRow[]> {
+  const data = await fetchJson("/markets", {
+    active: "true",
+    closed: "false",
+    order: "createdAt",
+    ascending: "false",
+    limit: String(RECENT_MARKETS_LIMIT),
+  });
+  if (!Array.isArray(data)) return [];
+  return data
+    .map((item) => normalizePolymarketRow(item as Record<string, unknown>, "recent"))
+    .filter((item): item is PolymarketRow => item !== null);
+}
+
+async function fetchCommodityEventMarkets(): Promise<PolymarketRow[]> {
+  const data = await fetchJson("/events", {
+    tag_slug: "commodities",
+    closed: "false",
+    limit: String(COMMODITIES_EVENTS_LIMIT),
+  });
+  if (!Array.isArray(data)) return [];
+  const out: PolymarketRow[] = [];
+  data.forEach((event) => {
+    if (!event || typeof event !== "object") return;
+    const record = event as Record<string, unknown>;
+    const eventContext = [
+      String(record.title ?? ""),
+      String(record.question ?? ""),
+      String(record.slug ?? ""),
+      String(record.description ?? ""),
+      "commodities",
+    ].join(" ");
+    const markets = record.markets;
+    if (!Array.isArray(markets)) return;
+    markets.forEach((market) => {
+      if (!market || typeof market !== "object") return;
+      const merged = {
+        ...(market as Record<string, unknown>),
+        category: (market as Record<string, unknown>).category ?? record.category ?? "commodities",
+        description: `${String((market as Record<string, unknown>).description ?? "")} ${eventContext}`.trim(),
+      };
+      const row = normalizePolymarketRow(merged, "commodity");
+      if (row && ["xauusd", "oil"].includes(String(row.meta.display_category ?? ""))) {
+        out.push(row);
+      }
+    });
+  });
+  return out;
+}
+
+function mergeMarkets(...marketLists: PolymarketRow[][]): PolymarketRow[] {
+  const merged = new Map<string, PolymarketRow>();
+  marketLists.flat().forEach((row) => {
+    const slug = String(row.market_slug || "").trim();
+    if (!slug) return;
+    const displayCategory = String(row.meta.display_category ?? "other");
+    const existing = merged.get(slug);
+    if (!existing) {
+      merged.set(slug, row);
+      return;
+    }
+    const existingDisplay = String(existing.meta.display_category ?? "other");
+    if ((CATEGORY_PRIORITY[displayCategory] ?? 0) > (CATEGORY_PRIORITY[existingDisplay] ?? 0)) {
+      merged.set(slug, row);
+      return;
+    }
+    if ((row.volume ?? 0) > (existing.volume ?? 0)) {
+      merged.set(slug, row);
+    }
+  });
+  return Array.from(merged.values()).sort((a, b) => ((b.volume ?? 0) + (b.liquidity ?? 0)) - ((a.volume ?? 0) + (a.liquidity ?? 0)));
 }
 
 Deno.serve(async (req) => {
@@ -244,7 +342,13 @@ Deno.serve(async (req) => {
 
   const supabase = createClient(PROJECT_URL, SERVICE_ROLE_KEY);
 
-  const [btcTick, rows] = await Promise.all([fetchBtcTick(), fetchPolymarketRows()]);
+  const [btcTick, topRows, recentRows, commodityRows] = await Promise.all([
+    fetchBtcTick(),
+    fetchTopVolumeMarkets(),
+    fetchRecentMarkets(),
+    fetchCommodityEventMarkets(),
+  ]);
+  const rows = mergeMarkets(topRows, recentRows, commodityRows);
 
   let btcWritten = false;
   if (btcTick) {
@@ -300,5 +404,8 @@ Deno.serve(async (req) => {
     btc_written: btcWritten,
     markets_written: marketsWritten,
     markets_fetched: rows.length,
+    top_markets: topRows.length,
+    recent_markets: recentRows.length,
+    commodity_markets: commodityRows.length,
   });
 });

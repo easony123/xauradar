@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ui.js - DOM rendering for XAU Radar dashboard.
  */
 
@@ -8,6 +8,7 @@ const THEME_KEY = 'xauradar_theme';
 const XAU_PIP_SIZE = 0.1;
 const LANG_KEY = 'xauradar_lang';
 const DASHBOARD_MODE_KEY = 'xauradar_dashboard_mode';
+const SIGNAL_LANE_KEY = 'xauradar_signal_lane';
 const POLY_CATEGORY_KEY = 'xauradar_poly_category';
 const POLY_SORT_KEY = 'xauradar_poly_sort';
 const POLY_VIEW_KEY = 'xauradar_poly_view';
@@ -39,6 +40,19 @@ const POLY_LABELS = {
   geopolitics: 'Geopolitics',
   xauusd: 'XAUUSD',
 };
+
+function getSelectedSignalLane() {
+  return String(localStorage.getItem(SIGNAL_LANE_KEY) || 'intraday').toLowerCase() === 'swing' ? 'swing' : 'intraday';
+}
+
+function setSelectedSignalLane(lane, emit = true) {
+  const normalized = String(lane || 'intraday').toLowerCase() === 'swing' ? 'swing' : 'intraday';
+  localStorage.setItem(SIGNAL_LANE_KEY, normalized);
+  if (emit && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('xauradar:signal-lane-change', { detail: { lane: normalized } }));
+  }
+  return normalized;
+}
 
 function toXauPips(priceDelta) {
   const delta = Number(priceDelta);
@@ -282,7 +296,7 @@ function normalizePolymarketCategory(rawCategory, titleText = '', meta = null) {
   if (/(trending|trend)/.test(text)) return 'trending';
   if (/(breaking|urgent|headline|flash|developing)/.test(text)) return 'breaking';
   if (/(new|fresh|latest|launched|launch)/.test(text)) return 'new';
-  if (/(xau|gold|bullion|xauusd|precious metal)/.test(text)) return 'xauusd';
+  if (/(xauusd|xau|spot gold|gold price|bullion|precious metal)/.test(text)) return 'xauusd';
   if (/(oil|wti|brent|crude|opec|energy)/.test(text)) return 'oil';
   if (/(politics|election|president|senate|congress|minister|party|government|white house|parliament|trump|biden|campaign|vote|voting)/.test(text)) return 'politics';
   if (/(war|geopolitic|geopolitics|conflict|russia|ukraine|china|taiwan|israel|middle east|iran|sanction|ceasefire|military|nato|putin|xi jinping|gaza|hezbollah)/.test(text)) return 'geopolitics';
@@ -462,7 +476,7 @@ function setGoogTransCookie(value) {
 
 function applyTranslateToggleLabel(btn, lang) {
   if (!btn) return;
-  btn.textContent = lang === 'zh-CN' ? 'EN' : '中文';
+  btn.textContent = lang === 'zh-CN' ? 'EN' : 'ä¸­æ–‡';
   btn.setAttribute('aria-label', lang === 'zh-CN' ? 'Switch language to English' : 'Switch language to Chinese');
 }
 
@@ -742,68 +756,154 @@ function getLaneThreshold(signal) {
   return lane === 'swing' ? 72 : 70;
 }
 
-function renderSignalHero(signal) {
-  const hero = document.getElementById('signal-hero');
-  if (!hero) return;
-  const heroChip = document.querySelector('.hero-chip');
-  if (heroChip) heroChip.textContent = 'Market Signal';
-
-  if (!signal) {
-    hero.innerHTML = `
-      <div class="signal-hero__badge waiting">Waiting for setup...</div>
-      <div class="signal-hero__time">Price refresh: 3m | Signal bot: 5m</div>
-    `;
-    return;
-  }
-
-  const type = signal.signal_type || signal.type || 'WAIT';
-  const lane = (signal.lane || 'intraday').toUpperCase();
-  const status = (signal.status || '').toUpperCase();
-  const scoreNum = Math.max(0, Math.min(100, Number(signal.score_total || 0)));
-  const confNum = Math.max(0, Math.min(100, Number(signal.confidence || scoreNum || 0)));
-  const conf = confNum.toFixed(0);
-  const score = scoreNum.toFixed(1);
-  const isReady = status === 'ACTIVE';
-  const blockedReason = signal.blocked_reason || signal?.conditions_met?.blocked_reason || null;
-  const reasonMap = {
+function describeBlockedReason(code) {
+  const map = {
     RR_BELOW_MIN: 'Risk/reward too low',
     HIGH_IMPACT_BLACKOUT: 'High-impact news time',
     SPREAD_TOO_WIDE: 'Spread too wide',
     STOP_DISTANCE_OUT_OF_BAND: 'Stop distance not valid',
     SCORE_BELOW_THRESHOLD: 'Quality score too low',
-    ACTIVE_SIGNAL_EXISTS: 'Another signal is active',
+    ACTIVE_SIGNAL_EXISTS: 'Lane already has an active trade',
+    ACTIVE_TRADE_OPEN: 'Trade already open in this lane',
+    CONSECUTIVE_SL_LIMIT: 'Consecutive stop-loss guard',
+    daily_guard_triggered: 'Daily risk guard active',
+    INSERT_FAILED: 'Signal storage failed',
   };
-  const reasonText = blockedReason ? (reasonMap[blockedReason] || blockedReason) : '';
-  const laneText = lane === 'SWING' ? 'Swing (H1/H4)' : 'Intraday (M15/H1)';
-  const confClass = confNum >= 70 ? 'conf-high' : confNum >= 50 ? 'conf-med' : 'conf-low';
-  const scoreClass = scoreNum >= 70 ? 'conf-high' : scoreNum >= 50 ? 'conf-med' : 'conf-low';
-  const time = formatMalaysiaTime(signal.created_at);
-  const regime = signal.h1_regime || ((signal.adx_value || 0) >= 20 ? 'Trending' : 'Range');
-  const minTrigger = getLaneThreshold(signal);
-  const setupLine = isReady
-    ? `${type} setup | ${laneText}`
-    : `Candidate only (${type}) | No active trade`;
+  return map[code] || code || 'Waiting for setup';
+}
 
-  const scaleText = 'Native scale: 0-100';
+function laneLabel(lane) {
+  return String(lane || 'intraday').toLowerCase() === 'swing' ? 'Swing (H1/H4)' : 'Intraday (M15/H1)';
+}
+
+function buildLiveProgress(signal, currentPrice) {
+  if (!signal) return 'Waiting for setup';
+  const side = String(signal.signal_type || signal.type || '').toUpperCase();
+  const state = String(signal.decision_state || signal.status || '').toUpperCase();
+  const entry = Number(signal.entry_price || 0);
+  const tp1 = Number(signal.tp1 || 0);
+  const tp2 = Number(signal.tp2 || 0);
+  const tp3 = Number(signal.tp3 || 0);
+  const sl = Number(signal.stop_loss ?? signal.sl ?? 0);
+  const price = Number(currentPrice || 0);
+
+  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(entry) || entry <= 0 || !side || side === 'WAIT') {
+    return state === 'ACTIVE' || state === 'IN_TRADE' ? 'Live setup waiting for next price tick' : 'Watching next setup';
+  }
+
+  const deltaFromEntry = toXauPips(Math.abs(price - entry));
+  const distance = (target) => `${toXauPips(Math.abs(target - price)).toFixed(1)}p`;
+
+  if (side === 'BUY') {
+    if (price >= tp3 && tp3 > 0) return `TP3 touched | ${distance(tp3)} beyond target`;
+    if (price >= tp2 && tp2 > 0) return `Above TP2 | ${distance(tp3)} to TP3`;
+    if (price >= tp1 && tp1 > 0) return `Above TP1 | ${distance(tp2)} to TP2`;
+    if (price <= sl && sl > 0) return `At stop zone | ${distance(entry)} back to entry`;
+    if (price >= entry) return `Live | +${deltaFromEntry.toFixed(1)}p from entry`;
+    return `Below entry | ${deltaFromEntry.toFixed(1)}p to entry`;
+  }
+
+  if (side === 'SELL') {
+    if (price <= tp3 && tp3 > 0) return `TP3 touched | ${distance(tp3)} beyond target`;
+    if (price <= tp2 && tp2 > 0) return `Below TP2 | ${distance(tp3)} to TP3`;
+    if (price <= tp1 && tp1 > 0) return `Below TP1 | ${distance(tp2)} to TP2`;
+    if (price >= sl && sl > 0) return `At stop zone | ${distance(entry)} back to entry`;
+    if (price <= entry) return `Live | +${deltaFromEntry.toFixed(1)}p from entry`;
+    return `Above entry | ${deltaFromEntry.toFixed(1)}p to entry`;
+  }
+
+  return 'Watching next setup';
+}
+
+function renderSignalHero(decisionRun, signalsByLane = {}, currentPrice = null) {
+  const hero = document.getElementById('signal-hero');
+  if (!hero) return;
+  const heroChip = document.querySelector('.hero-chip');
+  if (heroChip) heroChip.textContent = 'Market Signals';
+
+  const selectedLane = getSelectedSignalLane();
+  const lanes = ['intraday', 'swing'];
+  const laneModels = lanes.map((lane) => {
+    const activeSignal = signalsByLane?.[lane] || null;
+    const decision = decisionRun?.lanes?.[lane] || null;
+    return activeSignal
+      ? { ...(decision || {}), ...activeSignal, decision_state: decision?.decision_state || 'IN_TRADE', lane }
+      : decision;
+  }).filter(Boolean);
+
+  if (laneModels.length === 0) {
+    hero.innerHTML = `
+      <div class="signal-hero__badge waiting">Waiting for lane decisions...</div>
+      <div class="signal-hero__time">Price refresh: 3m | Signal bot: 5m</div>
+    `;
+    return;
+  }
 
   hero.innerHTML = `
-    <div class="signal-hero__badge ${status === 'REJECTED' ? 'waiting' : type.toLowerCase()}">${status === 'REJECTED' ? 'Not Ready' : type}</div>
-    <div class="signal-hero__conf"><span class="lane-badge lane-badge--${lane.toLowerCase()}">${lane}</span> ${setupLine}</div>
-    <div class="signal-hero__metrics">
-      <div class="hero-meter">
-        <div class="hero-meter__head">Score <strong class="${scoreClass}">${score}/100</strong></div>
-        <div class="hero-meter__track"><span class="hero-meter__fill ${scoreClass}" style="width:${scoreNum.toFixed(1)}%"></span></div>
-      </div>
-      <div class="hero-meter">
-        <div class="hero-meter__head">Confidence <strong class="${confClass}">${conf}%</strong></div>
-        <div class="hero-meter__track"><span class="hero-meter__fill ${confClass}" style="width:${confNum.toFixed(1)}%"></span></div>
-      </div>
+    <div class="signal-hero-grid">
+      ${lanes.map((lane) => {
+        const signal = laneModels.find((row) => String(row.lane || '').toLowerCase() === lane) || null;
+        if (!signal) {
+          return `
+            <button type="button" class="signal-lane-card signal-lane-card--empty ${selectedLane === lane ? 'is-selected' : ''}" data-lane="${lane}">
+              <div class="signal-lane-card__top">
+                <span class="lane-badge lane-badge--${lane}">${lane.toUpperCase()}</span>
+                <span class="signal-lane-card__state">WAITING</span>
+              </div>
+              <div class="signal-lane-card__side waiting">NO TRADE</div>
+              <div class="signal-lane-card__reason">No lane decision yet.</div>
+            </button>
+          `;
+        }
+
+        const decisionState = String(signal.decision_state || signal.status || 'NOT_READY').toUpperCase();
+        const side = String(signal.signal_type || signal.type || 'WAIT').toUpperCase();
+        const scoreNum = Math.max(0, Math.min(100, Number(signal.score_total || 0)));
+        const confNum = Math.max(0, Math.min(100, Number(signal.confidence || scoreNum || 0)));
+        const scoreClass = scoreNum >= 70 ? 'conf-high' : scoreNum >= 50 ? 'conf-med' : 'conf-low';
+        const confClass = confNum >= 70 ? 'conf-high' : confNum >= 50 ? 'conf-med' : 'conf-low';
+        const tradable = decisionState === 'ACTIVE' || decisionState === 'IN_TRADE';
+        const sideLabel = tradable && (side === 'BUY' || side === 'SELL') ? side : 'NO TRADE';
+        const badgeClass = sideLabel === 'BUY' ? 'buy' : sideLabel === 'SELL' ? 'sell' : 'waiting';
+        const trigger = getLaneThreshold(signal);
+        const reasonCode = signal.blocked_reason || signal.reason || signal?.conditions_met?.blocked_reason || '';
+        const reasonText = tradable
+          ? buildLiveProgress(signal, currentPrice)
+          : `${side && side !== 'WAIT' ? `Best setup: ${side}. ` : ''}${describeBlockedReason(reasonCode)}`;
+        const regime = signal.h1_regime || signal?.conditions_met?.adaptive_exits?.regime || ((Number(signal.adx_value || 0) >= 20) ? 'Trending' : 'Range');
+        const time = formatMalaysiaTime(signal.created_at);
+
+        return `
+          <button type="button" class="signal-lane-card ${selectedLane === lane ? 'is-selected' : ''}" data-lane="${lane}">
+            <div class="signal-lane-card__top">
+              <span class="lane-badge lane-badge--${lane}">${lane.toUpperCase()}</span>
+              <span class="signal-lane-card__state">${decisionState === 'IN_TRADE' ? 'IN TRADE' : decisionState}</span>
+            </div>
+            <div class="signal-lane-card__side ${badgeClass}">${sideLabel}</div>
+            <div class="signal-lane-card__headline">${lane === 'swing' ? 'Swing market signal' : 'Intraday market signal'}</div>
+            <div class="signal-lane-card__reason">${reasonText}</div>
+            <div class="signal-lane-card__metrics">
+              <div class="hero-meter">
+                <div class="hero-meter__head">Score <strong class="${scoreClass}">${scoreNum.toFixed(1)}/100</strong></div>
+                <div class="hero-meter__track"><span class="hero-meter__fill ${scoreClass}" style="width:${scoreNum.toFixed(1)}%"></span></div>
+              </div>
+              <div class="hero-meter">
+                <div class="hero-meter__head">Confidence <strong class="${confClass}">${confNum.toFixed(0)}%</strong></div>
+                <div class="hero-meter__track"><span class="hero-meter__fill ${confClass}" style="width:${confNum.toFixed(1)}%"></span></div>
+              </div>
+            </div>
+            <div class="signal-lane-card__meta">Trigger minimum: ${trigger.toFixed(0)}/100 | ${laneLabel(lane)}</div>
+            <div class="signal-lane-card__meta">Regime: ${regime} | Session: ${signal.session_context || '--'}</div>
+            <div class="signal-lane-card__time">${time || 'Waiting for engine update'}</div>
+          </button>
+        `;
+      }).join('')}
     </div>
-    <div class="signal-hero__conf signal-hero__threshold">Trigger minimum (${laneText}): Score ${minTrigger.toFixed(0)}/100 and Confidence ${minTrigger.toFixed(0)}%</div>
-    <div class="signal-hero__conf signal-hero__threshold">${scaleText}</div>
-    <div class="signal-hero__conf">Regime: ${regime}${reasonText ? ` | ${reasonText}` : ''}</div>
-    <div class="signal-hero__time">${time}</div>
   `;
+
+  hero.querySelectorAll('.signal-lane-card[data-lane]').forEach((card) => {
+    card.addEventListener('click', () => setSelectedSignalLane(card.dataset.lane));
+  });
 }
 
 function renderLevels(signal, currentPrice) {
@@ -893,10 +993,9 @@ function renderLevels(signal, currentPrice) {
   `;
 }
 
-function renderConditions(signal, snapshot, history = [], forcedLane = null) {
+function renderConditions(decisionRun, snapshot, forcedLane = null) {
   const container = document.getElementById('conditions-row');
   if (!container) return;
-  const LANE_KEY = 'xauradar_conditions_lane';
   const lanes = ['intraday', 'swing'];
 
   const renderRow = (label, items, tone = 'neutral') => `
@@ -951,22 +1050,17 @@ function renderConditions(signal, snapshot, history = [], forcedLane = null) {
     ];
   };
 
-  const findLaneSide = (lane, side) => {
-    const rows = Array.isArray(history) ? history : [];
-    return rows.find((row) => {
-      const rowLane = String(row.lane || 'intraday').toLowerCase();
-      const rowSide = String(row.signal_type || row.type || '').toUpperCase();
-      return rowLane === lane && rowSide === side && row.conditions_met && typeof row.conditions_met === 'object';
-    }) || null;
+  let activeLane = forcedLane || getSelectedSignalLane();
+  if (!lanes.includes(activeLane)) activeLane = 'intraday';
+
+  const getLaneData = (lane) => decisionRun?.lanes?.[lane] || null;
+  const getCandidate = (lane, side) => {
+    const laneData = getLaneData(lane);
+    return laneData?.candidates?.[String(side || '').toLowerCase()] || null;
   };
 
-  const savedLane = localStorage.getItem(LANE_KEY);
-  let activeLane = forcedLane || (lanes.includes(savedLane) ? savedLane : null) || String(signal?.lane || 'intraday').toLowerCase();
-  if (!lanes.includes(activeLane)) activeLane = 'intraday';
-  localStorage.setItem(LANE_KEY, activeLane);
-
   const renderSidePanel = (lane, side) => {
-    const row = findLaneSide(lane, side);
+    const row = getCandidate(lane, side);
     const tone = side === 'BUY' ? 'buy' : 'sell';
     if (!row) {
       const previewRaw = buildPreviewItems(side, lane);
@@ -1022,13 +1116,12 @@ function renderConditions(signal, snapshot, history = [], forcedLane = null) {
   };
 
   const resolveAdaptiveExits = () => {
-    const fromSignal = signal?.conditions_met?.adaptive_exits;
-    if (fromSignal && typeof fromSignal === 'object') return fromSignal;
-    const matchAny = (Array.isArray(history) ? history : []).find((row) => {
-      const rowLane = String(row.lane || 'intraday').toLowerCase();
-      return rowLane === activeLane && row?.conditions_met?.adaptive_exits && typeof row.conditions_met.adaptive_exits === 'object';
-    });
-    return matchAny?.conditions_met?.adaptive_exits || null;
+    const laneData = getLaneData(activeLane);
+    const fromLane = laneData?.conditions_met?.adaptive_exits;
+    if (fromLane && typeof fromLane === 'object') return fromLane;
+    return getCandidate(activeLane, 'BUY')?.conditions_met?.adaptive_exits
+      || getCandidate(activeLane, 'SELL')?.conditions_met?.adaptive_exits
+      || null;
   };
 
   const adaptive = resolveAdaptiveExits();
@@ -1040,11 +1133,11 @@ function renderConditions(signal, snapshot, history = [], forcedLane = null) {
     <div class="conditions-tabs" role="tablist" aria-label="Condition lanes">
       ${lanes.map((lane) => `
         <button type="button" class="conditions-tab ${lane === activeLane ? 'active' : ''}" data-lane="${lane}" role="tab" aria-selected="${lane === activeLane}">
-          ${lane === 'intraday' ? 'Intraday (M15/H1)' : 'Swing (H1/H4)'}
+          ${laneLabel(lane)}
         </button>
       `).join('')}
     </div>
-    ${String(signal?.status || '').toUpperCase() !== 'ACTIVE'
+    ${!['ACTIVE', 'IN_TRADE'].includes(String(getLaneData(activeLane)?.decision_state || '').toUpperCase())
       ? '<div class="feature-note feature-note--warning">No active trade now. BUY/SELL below are setup checks only.</div>'
       : ''}
     <div class="feature-note">${adaptiveText}</div>
@@ -1058,8 +1151,8 @@ function renderConditions(signal, snapshot, history = [], forcedLane = null) {
     btn.addEventListener('click', () => {
       const lane = String(btn.dataset.lane || '').toLowerCase();
       if (!lanes.includes(lane)) return;
-      localStorage.setItem(LANE_KEY, lane);
-      renderConditions(signal, snapshot, history, lane);
+      setSelectedSignalLane(lane);
+      renderConditions(decisionRun, snapshot, lane);
     });
   });
 }
@@ -1365,7 +1458,7 @@ function renderPolymarketDashboard(btcTick, markets) {
 
   if (syncEl) {
     const ts = activeBtc?.provider_ts || activeBtc?.created_at || null;
-    syncEl.textContent = ts ? `Last sync: ${formatMalaysiaTime(ts)}` : 'Last sync: --';
+    syncEl.textContent = ts ? `Last sync: ${formatMalaysiaTime(ts)}` : 'Δ --';
   }
 
   if (kpiCountEl) {
@@ -1406,7 +1499,7 @@ function renderPolymarketDashboard(btcTick, markets) {
       if (activeBtc) {
         const chg = Number(activeBtc.change_24h ?? activeBtc.change24h);
         const ts = activeBtc.provider_ts || activeBtc.created_at;
-        const age = ts ? `Last sync: ${formatMalaysiaTime(ts, true)}` : 'Last sync: --';
+        const age = ts ? `Last sync: ${formatMalaysiaTime(ts, true)}` : 'Δ --';
         headerChange.textContent = Number.isFinite(chg)
           ? `BTC 24h: ${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% | ${age}`
           : `BTC 24h: -- | ${age}`;
@@ -1450,7 +1543,7 @@ function renderPolymarketDashboard(btcTick, markets) {
     return;
   }
 
-  const top = filtered.slice(0, 48);
+  const top = filtered.slice(0, 60);
   listEl.innerHTML = top.map((market) => {
     const category = POLY_LABELS[market.category] || String(market.category || 'Other').toUpperCase();
     const iconByCategory = {
@@ -1679,7 +1772,7 @@ function renderDemoEquityCurve(points) {
   `;
 }
 
-function renderDemoDashboard(perf, curve = [], trades = []) {
+function renderDemoDashboard(perf, curve = [], trades = [], events = []) {
   const summary = document.getElementById('demo-summary-grid');
   const lane = document.getElementById('demo-lane-split');
   const history = document.getElementById('demo-trade-history');
@@ -1728,11 +1821,42 @@ function renderDemoDashboard(perf, curve = [], trades = []) {
     </div>
   `;
 
-  const rows = Array.isArray(trades) ? trades.slice(0, 20) : [];
-  if (rows.length === 0) {
+  const eventRows = Array.isArray(events) ? events.slice(0, 24) : [];
+  const tradeRows = Array.isArray(trades) ? trades.slice(0, 20) : [];
+  if (eventRows.length === 0 && tradeRows.length === 0) {
     history.innerHTML = '<div class="feature-note">No demo trades yet.</div>';
+  } else if (eventRows.length > 0) {
+    const eventLabels = {
+      OPEN: 'Opened',
+      TP1_PARTIAL: 'TP1 partial',
+      SL_TO_BREAKEVEN: 'SL -> breakeven',
+      TP2: 'TP2',
+      TP3: 'TP3',
+      STOP_LOSS: 'Stop loss',
+      BREAKEVEN: 'Breakeven',
+      EXPIRED: 'Expired',
+    };
+    history.innerHTML = eventRows.map((evt) => {
+      const laneText = String(evt.lane || 'intraday').toUpperCase();
+      const eventType = String(evt.event_type || '--').toUpperCase();
+      const price = Number(evt.event_price || 0);
+      const pnl = Number(evt.pnl_usd || 0);
+      const pnlCls = pnl > 0 ? 'profit' : pnl < 0 ? 'loss' : 'text-muted';
+      return `
+        <div class="demo-trade-row">
+          <div class="demo-trade-row__left">
+            <div class="demo-trade-row__meta">${laneText} | ${eventLabels[eventType] || eventType}</div>
+            <div class="demo-trade-row__sub">Price ${price ? price.toFixed(2) : '--'} | Size ${Number(evt.realized_size || 0).toFixed(3)} | Left ${Number(evt.remaining_size || 0).toFixed(3)}</div>
+          </div>
+          <div class="demo-trade-row__right">
+            <div class="demo-trade-row__pnl ${pnlCls}">${formatMoney(pnl)}</div>
+            <div class="demo-trade-row__sub">${formatMalaysiaTime(evt.created_at, true)}</div>
+          </div>
+        </div>
+      `;
+    }).join('');
   } else {
-    history.innerHTML = rows.map((t) => {
+    history.innerHTML = tradeRows.map((t) => {
       const side = String(t.side || '--').toUpperCase();
       const laneText = String(t.lane || 'intraday').toUpperCase();
       const statusText = String(t.status || '--').toUpperCase();
@@ -1856,6 +1980,8 @@ window.UI = {
   initNavigation,
   initDashboardSwitch,
   initPolymarketControls,
+  getSelectedSignalLane,
+  setSelectedSignalLane,
   setDashboardMode,
   getDashboardMode,
   initChartTime,
@@ -1878,4 +2004,5 @@ window.UI = {
   renderDemoEquityCurve,
   updateRiskCalc,
 };
+
 
