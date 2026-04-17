@@ -30,10 +30,16 @@ const SERVICE_ROLE_KEY = Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPAB
 const POLYMARKET_COLLECTOR_CRON_SECRET = Deno.env.get("POLYMARKET_COLLECTOR_CRON_SECRET") ?? "";
 const COINGECKO_API_KEY = Deno.env.get("COINGECKO_API_KEY") ?? "";
 const POLYMARKET_BASE_URL = Deno.env.get("POLYMARKET_BASE_URL") ?? "https://gamma-api.polymarket.com";
-const parsedCuratedLimit = Number(Deno.env.get("POLYMARKET_CURATED_LIMIT") ?? "18");
-const CURATED_LIMIT = Number.isFinite(parsedCuratedLimit) && parsedCuratedLimit > 0
-  ? Math.floor(parsedCuratedLimit)
-  : 18;
+const ALLOWED_POLY_CATEGORIES = new Set([
+  "trending",
+  "breaking",
+  "new",
+  "politics",
+  "finance",
+  "geopolitics",
+  "oil",
+  "xauusd",
+]);
 
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -82,11 +88,14 @@ function normalizeProbability(raw: unknown, fallbackPrice: number | null): numbe
 
 function classifyCategory(text: string): string {
   const t = text.toLowerCase();
-  if (/\b(fed|fomc|powell|rate cut|rate hike|interest rate|us rates|cpi|pce|nfp)\b/.test(t)) return "fed";
-  if (/\b(war|ukraine|russia|israel|gaza|taiwan|geopolitic|missile|sanction|ceasefire|conflict|putin|xi jinping)\b/.test(t)) return "geopolitics";
-  if (/\b(gold|xau|xauusd)\b/.test(t)) return "gold";
-  if (/\b(oil|brent|wti|crude)\b/.test(t)) return "oil";
-  if (/\b(bitcoin|btc|ethereum|eth|solana|sol|crypto|doge|xrp)\b/.test(t)) return "crypto";
+  if (/\b(trending|trend)\b/.test(t)) return "trending";
+  if (/\b(breaking|headline|urgent)\b/.test(t)) return "breaking";
+  if (/\b(new|latest|fresh)\b/.test(t)) return "new";
+  if (/\b(gold|xau|xauusd|bullion|precious metal)\b/.test(t)) return "xauusd";
+  if (/\b(oil|brent|wti|crude|opec|energy)\b/.test(t)) return "oil";
+  if (/\b(politics|election|president|senate|congress|minister|government|white house|parliament|trump|biden)\b/.test(t)) return "politics";
+  if (/\b(war|ukraine|russia|israel|gaza|taiwan|geopolitic|missile|sanction|ceasefire|conflict|putin|xi jinping|iran|nato|military)\b/.test(t)) return "geopolitics";
+  if (/\b(finance|financial|fomc|fed|powell|rate cut|rate hike|interest rate|us rates|cpi|pce|nfp|inflation|gdp|economy|tariff|yield|stocks|nasdaq|dow|s&p|bond|dollar|usd)\b/.test(t)) return "finance";
   return "other";
 }
 
@@ -152,8 +161,24 @@ function normalizePolymarketRow(row: Record<string, unknown>): PolymarketRow | n
   const probability = normalizeProbability(row.probability, yesPrice);
   if (probability === null) return null;
 
-  const category = classifyCategory(`${title} ${String(row.description ?? "")}`);
-  if (category === "other") return null;
+  const rawTags = parseMaybeArray(row.tags);
+  const tagText = rawTags.map((tag) => {
+    if (tag && typeof tag === "object") {
+      const record = tag as Record<string, unknown>;
+      return `${String(record.label ?? "")} ${String(record.name ?? "")}`.trim();
+    }
+    return String(tag ?? "").trim();
+  }).join(" ");
+
+  const category = classifyCategory([
+    title,
+    String(row.description ?? ""),
+    String(row.category ?? ""),
+    String(row.series ?? ""),
+    String(row.topic ?? ""),
+    tagText,
+  ].join(" "));
+  if (category === "other" || !ALLOWED_POLY_CATEGORIES.has(category)) return null;
 
   const slugRaw = String(row.slug ?? row.market_slug ?? row.id ?? "").trim();
   const marketSlug = slugRaw || `${category}-${slugify(title)}`;
@@ -183,36 +208,11 @@ function normalizePolymarketRow(row: Record<string, unknown>): PolymarketRow | n
   };
 }
 
-function curateMarkets(rows: PolymarketRow[]): PolymarketRow[] {
-  const groups = new Map<string, PolymarketRow[]>();
-  for (const row of rows) {
-    const arr = groups.get(row.category) ?? [];
-    arr.push(row);
-    groups.set(row.category, arr);
-  }
-
-  const categoryOrder = ["crypto", "gold", "oil", "geopolitics", "fed"];
-  const perCategory = Math.max(1, Math.floor(CURATED_LIMIT / categoryOrder.length));
-  const curated: PolymarketRow[] = [];
-
-  for (const cat of categoryOrder) {
-    const list = groups.get(cat) ?? [];
-    list.sort((a, b) => {
-      const aScore = (a.volume ?? 0) + (a.liquidity ?? 0);
-      const bScore = (b.volume ?? 0) + (b.liquidity ?? 0);
-      return bScore - aScore;
-    });
-    curated.push(...list.slice(0, perCategory));
-  }
-
-  return curated.slice(0, CURATED_LIMIT);
-}
-
 async function fetchPolymarketRows(): Promise<PolymarketRow[]> {
   const url = new URL(`${POLYMARKET_BASE_URL.replace(/\/$/, "")}/markets`);
   url.searchParams.set("active", "true");
   url.searchParams.set("closed", "false");
-  url.searchParams.set("limit", "300");
+  url.searchParams.set("limit", "1000");
 
   try {
     const resp = await fetch(url);
@@ -227,7 +227,8 @@ async function fetchPolymarketRows(): Promise<PolymarketRow[]> {
       .map((item) => normalizePolymarketRow(item as Record<string, unknown>))
       .filter((item): item is PolymarketRow => item !== null);
 
-    return curateMarkets(normalized);
+    normalized.sort((a, b) => ((b.volume ?? 0) + (b.liquidity ?? 0)) - ((a.volume ?? 0) + (a.liquidity ?? 0)));
+    return normalized;
   } catch (err) {
     console.error("Polymarket request failed:", err);
     return [];

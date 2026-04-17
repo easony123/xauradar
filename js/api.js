@@ -13,6 +13,8 @@ let supabaseClient = null;
 let lastPrice = null;
 let priceDirection = null; // 'up' | 'down' | null
 let lastLiveSnapshot = null;
+const API_XAU_PIP_SIZE = 0.1;
+const ALLOWED_POLY_CATEGORIES = ['trending', 'breaking', 'new', 'politics', 'finance', 'geopolitics', 'oil', 'xauusd'];
 
 function normalizeSource(raw) {
   const src = String(raw || '').trim().toUpperCase();
@@ -34,6 +36,13 @@ function tryParseJson(value) {
 function parseNumber(value, fallback = 0) {
   const n = typeof value === 'number' ? value : parseFloat(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function toXauPipsApi(priceDelta) {
+  const n = parseNumber(priceDelta, NaN);
+  if (!Number.isFinite(n)) return NaN;
+  const pipSize = Number.isFinite(API_XAU_PIP_SIZE) && API_XAU_PIP_SIZE > 0 ? API_XAU_PIP_SIZE : 0.1;
+  return n / pipSize;
 }
 
 function toMillis(value) {
@@ -87,13 +96,21 @@ function normalizeSnapshot(snapshot) {
  * Initialize Supabase client.
  */
 function initSupabase() {
-  if (typeof supabase !== 'undefined' && supabase.createClient) {
-    supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  const sdk = typeof window !== 'undefined' ? window.supabase : null;
+  if (!sdk || typeof sdk.createClient !== 'function') {
+    console.warn('Supabase SDK not loaded (window.supabase missing).');
+    return false;
+  }
+
+  try {
+    supabaseClient = sdk.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     console.log('Supabase initialized');
     return true;
+  } catch (err) {
+    console.warn('Supabase client init failed:', err?.message || err);
+    supabaseClient = null;
+    return false;
   }
-  console.warn('Supabase SDK not loaded');
-  return false;
 }
 
 async function signUpWithEmail(email, password) {
@@ -330,12 +347,13 @@ async function fetchLatestBtcTick() {
   }
 }
 
-async function fetchPolymarketMarkets(limit = 24) {
+async function fetchPolymarketMarkets(limit = 500) {
   if (!supabaseClient) return [];
   try {
     const { data, error } = await supabaseClient
       .from('polymarket_markets')
       .select('*')
+      .in('category', ALLOWED_POLY_CATEGORIES)
       .order('category', { ascending: true })
       .order('probability', { ascending: false })
       .limit(limit);
@@ -452,7 +470,7 @@ async function fetchPerformanceStats() {
     if (error) throw error;
     if (!data || data.length === 0) return null;
 
-    const realizedStatuses = ['HIT_TP1', 'HIT_TP2', 'HIT_TP3', 'HIT_SL', 'EXPIRED'];
+    const realizedStatuses = ['HIT_TP1', 'HIT_TP2', 'HIT_TP3', 'HIT_SL', 'BREAKEVEN', 'EXPIRED'];
     const realizedRows = data.filter((s) => realizedStatuses.includes(s.status));
     const rejectedRows = data.filter((s) => s.status === 'REJECTED');
     const executedRows = data.filter((s) => s.status !== 'REJECTED');
@@ -462,6 +480,7 @@ async function fetchPerformanceStats() {
       if (status === 'HIT_TP2') return 2.0;
       if (status === 'HIT_TP3') return 3.0;
       if (status === 'HIT_SL') return -1.0;
+      if (status === 'BREAKEVEN') return 0.0;
       if (status === 'EXPIRED') return -0.2;
       return 0;
     };
@@ -525,12 +544,24 @@ async function fetchPerformanceStats() {
 
     let totalPips = 0;
     realizedRows.forEach((s) => {
-      const atr = parseFloat(s.atr_value) || 10;
-      if (s.status === 'HIT_TP1') totalPips += atr * 1.0;
-      if (s.status === 'HIT_TP2') totalPips += atr * 2.0;
-      if (s.status === 'HIT_TP3') totalPips += atr * 3.0;
-      if (s.status === 'HIT_SL') totalPips -= atr * 1.5;
-      if (s.status === 'EXPIRED') totalPips -= atr * 0.2;
+      const entry = parseNumber(s.entry_price, NaN);
+      const tp1 = parseNumber(s.tp1, NaN);
+      const tp2 = parseNumber(s.tp2, NaN);
+      const tp3 = parseNumber(s.tp3, NaN);
+      const sl = parseNumber(s.stop_loss ?? s.sl, NaN);
+      const status = String(s.status || '').toUpperCase();
+
+      if (!Number.isFinite(entry)) return;
+
+      let move = 0;
+      if (status === 'HIT_TP1' && Number.isFinite(tp1)) move = Math.abs(tp1 - entry);
+      if (status === 'HIT_TP2' && Number.isFinite(tp2)) move = Math.abs(tp2 - entry);
+      if (status === 'HIT_TP3' && Number.isFinite(tp3)) move = Math.abs(tp3 - entry);
+      if (status === 'HIT_SL' && Number.isFinite(sl)) move = -Math.abs(sl - entry);
+      if (status === 'EXPIRED') move = 0;
+
+      const pips = toXauPipsApi(move);
+      if (Number.isFinite(pips)) totalPips += pips;
     });
 
     return {

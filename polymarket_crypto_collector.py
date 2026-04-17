@@ -23,10 +23,17 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "").strip()
 POLYMARKET_BASE_URL = (os.getenv("POLYMARKET_BASE_URL") or "https://gamma-api.polymarket.com").rstrip("/")
-try:
-    POLYMARKET_CURATED_LIMIT = int((os.getenv("POLYMARKET_CURATED_LIMIT") or "18").strip())
-except ValueError:
-    POLYMARKET_CURATED_LIMIT = 18
+
+ALLOWED_POLY_CATEGORIES = {
+    "trending",
+    "breaking",
+    "new",
+    "politics",
+    "finance",
+    "geopolitics",
+    "oil",
+    "xauusd",
+}
 
 
 def parse_num(value: Any) -> float | None:
@@ -80,16 +87,22 @@ def normalize_probability(raw: Any, fallback_yes_price: float | None) -> float |
 
 def classify_category(text: str) -> str:
     t = text.lower()
-    if re.search(r"\b(fed|fomc|powell|rate cut|rate hike|interest rate|us rates|cpi|pce|nfp)\b", t):
-        return "fed"
-    if re.search(r"\b(war|ukraine|russia|israel|gaza|taiwan|geopolitic|missile|sanction|ceasefire|conflict|putin|xi jinping)\b", t):
-        return "geopolitics"
-    if re.search(r"\b(gold|xau|xauusd)\b", t):
-        return "gold"
-    if re.search(r"\b(oil|brent|wti|crude)\b", t):
+    if re.search(r"\b(trending|trend)\b", t):
+        return "trending"
+    if re.search(r"\b(breaking|headline|urgent)\b", t):
+        return "breaking"
+    if re.search(r"\b(new|latest|fresh)\b", t):
+        return "new"
+    if re.search(r"\b(gold|xau|xauusd|bullion|precious metal)\b", t):
+        return "xauusd"
+    if re.search(r"\b(oil|brent|wti|crude|opec|energy)\b", t):
         return "oil"
-    if re.search(r"\b(bitcoin|btc|ethereum|eth|solana|sol|crypto|doge|xrp)\b", t):
-        return "crypto"
+    if re.search(r"\b(politics|election|president|senate|congress|minister|government|white house|parliament|trump|biden)\b", t):
+        return "politics"
+    if re.search(r"\b(war|ukraine|russia|israel|gaza|taiwan|geopolitic|missile|sanction|ceasefire|conflict|putin|xi jinping|iran|nato|military)\b", t):
+        return "geopolitics"
+    if re.search(r"\b(finance|financial|fomc|fed|powell|rate cut|rate hike|interest rate|us rates|cpi|pce|nfp|inflation|gdp|economy|tariff|yield|stocks|nasdaq|dow|s&p|bond|dollar|usd)\b", t):
+        return "finance"
     return "other"
 
 
@@ -165,8 +178,26 @@ def normalize_market_row(row: dict[str, Any]) -> dict[str, Any] | None:
     if probability is None:
         return None
 
-    category = classify_category(f"{title} {row.get('description', '')}")
-    if category == "other":
+    tags_blob = ""
+    for tag in parse_maybe_array(row.get("tags")):
+        if isinstance(tag, dict):
+            tags_blob += f" {tag.get('label', '')} {tag.get('name', '')}"
+        else:
+            tags_blob += f" {tag}"
+
+    context_blob = " ".join(
+        str(v or "")
+        for v in [
+            title,
+            row.get("description", ""),
+            row.get("category", ""),
+            row.get("series", ""),
+            row.get("topic", ""),
+            tags_blob,
+        ]
+    )
+    category = classify_category(context_blob)
+    if category == "other" or category not in ALLOWED_POLY_CATEGORIES:
         return None
 
     slug = str(row.get("slug") or row.get("market_slug") or row.get("id") or "").strip()
@@ -199,21 +230,8 @@ def normalize_market_row(row: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def curate_markets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    categories = ["crypto", "gold", "oil", "geopolitics", "fed"]
-    per_category = max(1, POLYMARKET_CURATED_LIMIT // len(categories))
-    curated: list[dict[str, Any]] = []
-
-    for category in categories:
-        bucket = [r for r in rows if r.get("category") == category]
-        bucket.sort(key=lambda r: float(r.get("volume", 0) or 0) + float(r.get("liquidity", 0) or 0), reverse=True)
-        curated.extend(bucket[:per_category])
-
-    return curated[:POLYMARKET_CURATED_LIMIT]
-
-
 def fetch_polymarket_markets() -> list[dict[str, Any]]:
-    params = {"active": "true", "closed": "false", "limit": "300"}
+    params = {"active": "true", "closed": "false", "limit": "1000"}
     try:
         resp = requests.get(f"{POLYMARKET_BASE_URL}/markets", params=params, timeout=14)
         resp.raise_for_status()
@@ -233,7 +251,8 @@ def fetch_polymarket_markets() -> list[dict[str, Any]]:
         if row:
             normalized.append(row)
 
-    return curate_markets(normalized)
+    normalized.sort(key=lambda r: float(r.get("volume", 0) or 0) + float(r.get("liquidity", 0) or 0), reverse=True)
+    return normalized
 
 
 def main() -> int:
@@ -264,7 +283,7 @@ def main() -> int:
             print(f"ERROR writing polymarket_markets: {exc}")
             return 1
     else:
-        print("WARN: No curated Polymarket markets fetched")
+        print("WARN: No Polymarket markets fetched for allowed categories")
 
     return 0
 

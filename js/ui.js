@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ui.js - DOM rendering for XAU Radar dashboard.
  */
 
@@ -11,6 +11,7 @@ const DASHBOARD_MODE_KEY = 'xauradar_dashboard_mode';
 const POLY_CATEGORY_KEY = 'xauradar_poly_category';
 const POLY_SORT_KEY = 'xauradar_poly_sort';
 const POLY_VIEW_KEY = 'xauradar_poly_view';
+const POLY_BET_TYPE_KEY = 'xauradar_poly_bet_type';
 
 let activeDashboardMode = 'xau';
 let lastXauPage = 'signal';
@@ -21,18 +22,30 @@ const polymarketState = {
   query: '',
   sort: 'volume',
   view: 'all',
+  betType: 'all',
 };
-const POLY_CATEGORIES = ['all', 'crypto', 'gold', 'oil', 'geopolitics', 'fed'];
+const POLY_CATEGORIES = ['all', 'trending', 'breaking', 'new', 'politics', 'finance', 'geopolitics', 'oil', 'xauusd'];
 const POLY_SORT_OPTIONS = ['volume', 'liquidity', 'ending', 'probability'];
 const POLY_VIEW_OPTIONS = ['all', 'active', 'ending', 'resolved'];
+const POLY_BET_TYPE_OPTIONS = ['all', 'up_down', 'above_below', 'price_range', 'hit_price'];
 const POLY_LABELS = {
   all: 'All',
-  crypto: 'Crypto',
-  gold: 'Gold',
+  trending: 'Trending',
+  breaking: 'Breaking',
+  new: 'New',
+  politics: 'Politics',
+  finance: 'Finance',
   oil: 'Oil',
   geopolitics: 'Geopolitics',
-  fed: 'Fed',
+  xauusd: 'XAUUSD',
 };
+
+function toXauPips(priceDelta) {
+  const delta = Number(priceDelta);
+  if (!Number.isFinite(delta)) return NaN;
+  const pipSize = Number.isFinite(XAU_PIP_SIZE) && XAU_PIP_SIZE > 0 ? XAU_PIP_SIZE : 0.1;
+  return delta / pipSize;
+}
 
 const MY_FULL_TIME_FMT = new Intl.DateTimeFormat('en-MY', {
   timeZone: APP_TIMEZONE,
@@ -262,12 +275,24 @@ function normalizePolymarketCategory(rawCategory, titleText = '') {
   if (POLY_CATEGORIES.includes(value)) return value;
 
   const text = `${value} ${String(titleText || '').toLowerCase()}`;
-  if (/(btc|bitcoin|eth|sol|xrp|crypto|doge|altcoin)/.test(text)) return 'crypto';
-  if (/(xau|gold|bullion)/.test(text)) return 'gold';
+  if (/(trending|trend)/.test(text)) return 'trending';
+  if (/(breaking|urgent|headline)/.test(text)) return 'breaking';
+  if (/(new|fresh|latest)/.test(text)) return 'new';
+  if (/(xau|gold|bullion|xauusd)/.test(text)) return 'xauusd';
   if (/(oil|wti|brent|crude)/.test(text)) return 'oil';
-  if (/(fomc|fed|powell|rate|cpi|inflation|nfp|jobs|yield)/.test(text)) return 'fed';
-  if (/(war|geopolitic|conflict|russia|ukraine|china|taiwan|israel|middle east|election)/.test(text)) return 'geopolitics';
+  if (/(politics|election|president|senate|congress|minister|party|government|trump|biden)/.test(text)) return 'politics';
+  if (/(fomc|fed|powell|rate|cpi|inflation|nfp|jobs|yield|treasury|tariff|economy|recession|gdp|finance|financial|stocks|nasdaq|s&p|dow|bond|dollar|usd)/.test(text)) return 'finance';
+  if (/(war|geopolitic|geopolitics|conflict|russia|ukraine|china|taiwan|israel|middle east|iran|sanction|ceasefire|military|nato)/.test(text)) return 'geopolitics';
   return 'other';
+}
+
+function classifyBetType(titleText = '') {
+  const t = String(titleText || '').toLowerCase();
+  if (/(up or down|up\/down|\bup\b.*\bdown\b|\bdown\b.*\bup\b)/.test(t)) return 'up_down';
+  if (/(above|below|over|under)/.test(t)) return 'above_below';
+  if (/(range|between|from .* to|price band)/.test(t)) return 'price_range';
+  if (/(hit|reach|touch)/.test(t)) return 'hit_price';
+  return 'all';
 }
 
 function normalizePercent(value) {
@@ -285,6 +310,8 @@ function clamp01To100(value) {
 function normalizePolymarketRow(row) {
   const title = String(row?.title || row?.question || 'Untitled market');
   const category = normalizePolymarketCategory(row?.category, title);
+  if (!POLY_CATEGORIES.includes(category) || category === 'all') return null;
+  const marketType = classifyBetType(title);
   const probability = clamp01To100(normalizePercent(row?.probability));
 
   let yesPct = clamp01To100(normalizePercent(row?.yes_price));
@@ -305,6 +332,7 @@ function normalizePolymarketRow(row) {
     ...row,
     title,
     category,
+    marketType,
     probability,
     yesPct,
     noPct,
@@ -337,8 +365,16 @@ function setPolymarketView(viewValue, opts = {}) {
   if (persist) localStorage.setItem(POLY_VIEW_KEY, next);
 }
 
+function setPolymarketBetType(value, opts = {}) {
+  const persist = opts.persist !== false;
+  const next = POLY_BET_TYPE_OPTIONS.includes(value) ? value : 'all';
+  polymarketState.betType = next;
+  if (persist) localStorage.setItem(POLY_BET_TYPE_KEY, next);
+}
+
 function initPolymarketControls() {
   const tabs = Array.from(document.querySelectorAll('#polymarket-tabs .poly-tab'));
+  const betTabs = Array.from(document.querySelectorAll('#polymarket-bet-tabs .poly-bet-tab'));
   const viewTabs = Array.from(document.querySelectorAll('#polymarket-view-nav .poly-view-tab'));
   const searchInput = document.getElementById('polymarket-search');
   const sortSelect = document.getElementById('polymarket-sort');
@@ -346,9 +382,11 @@ function initPolymarketControls() {
   const savedCategory = localStorage.getItem(POLY_CATEGORY_KEY);
   const savedSort = localStorage.getItem(POLY_SORT_KEY);
   const savedView = localStorage.getItem(POLY_VIEW_KEY);
+  const savedBetType = localStorage.getItem(POLY_BET_TYPE_KEY);
   setPolymarketCategory(savedCategory || 'all', { persist: false });
   setPolymarketSort(savedSort || 'volume', { persist: false });
   setPolymarketView(savedView || 'all', { persist: false });
+  setPolymarketBetType(savedBetType || 'all', { persist: false });
 
   if (sortSelect) sortSelect.value = polymarketState.sort;
 
@@ -358,6 +396,17 @@ function initPolymarketControls() {
       btn.addEventListener('click', () => {
         const category = String(btn.dataset.category || 'all').toLowerCase();
         setPolymarketCategory(category);
+        renderPolymarketDashboard();
+      });
+    }
+  });
+
+  betTabs.forEach((btn) => {
+    if (!btn.dataset.bound) {
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', () => {
+        const value = String(btn.dataset.betType || 'all').toLowerCase();
+        setPolymarketBetType(value);
         renderPolymarketDashboard();
       });
     }
@@ -408,8 +457,8 @@ function setGoogTransCookie(value) {
 
 function applyTranslateToggleLabel(btn, lang) {
   if (!btn) return;
-  btn.textContent = lang === 'zh-CN' ? 'EN' : '中文';
-  btn.setAttribute('aria-label', lang === 'zh-CN' ? 'Switch language to English' : '切换到中文');
+  btn.textContent = lang === 'zh-CN' ? 'EN' : 'ä¸­æ–‡';
+  btn.setAttribute('aria-label', lang === 'zh-CN' ? 'Switch language to English' : 'åˆ‡æ¢åˆ°ä¸­æ–‡');
 }
 
 function initTranslateToggle() {
@@ -644,7 +693,7 @@ function updateHeaderPrice(priceData) {
   const delta = Number(priceData.changeValue);
   const deltaPct = Number(priceData.changePct);
   const hasDelta = Number.isFinite(delta) && Number.isFinite(deltaPct);
-  const deltaPips = hasDelta ? (delta / XAU_PIP_SIZE) : NaN;
+  const deltaPips = hasDelta ? toXauPips(delta) : NaN;
   const deltaSign = hasDelta ? (delta > 0 ? '+' : delta < 0 ? '-' : '') : '';
   const deltaIcon = hasDelta ? (delta > 0 ? '▲' : delta < 0 ? '▼' : '•') : '•';
   const deltaClass = hasDelta ? (delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat') : 'flat';
@@ -799,10 +848,11 @@ function renderLevels(signal, currentPrice) {
   }
 
   const dist = (target) => {
-    if (!target || !price) return '';
-    return `${Math.abs(target - price).toFixed(1)}p`;
+    if (!target || !entry) return '';
+    const delta = Math.abs(target - entry);
+    const pips = toXauPips(delta);
+    return `${pips.toFixed(1)}p`;
   };
-
   const hitCheck = (target, isTp) => {
     if (!price || !target) return '';
     if (isTp && signalType === 'BUY' && price >= target) return ' hit';
@@ -1161,7 +1211,9 @@ function renderPolymarketDashboard(btcTick, markets) {
     polymarketState.btcTick = btcTick || null;
   }
   if (markets !== undefined) {
-    polymarketState.markets = Array.isArray(markets) ? markets.map(normalizePolymarketRow) : [];
+    polymarketState.markets = Array.isArray(markets)
+      ? markets.map(normalizePolymarketRow).filter((row) => row && POLY_CATEGORIES.includes(row.category) && row.category !== 'all')
+      : [];
   }
 
   const activeBtc = polymarketState.btcTick;
@@ -1170,8 +1222,10 @@ function renderPolymarketDashboard(btcTick, markets) {
   const activeSort = polymarketState.sort;
   const activeQuery = polymarketState.query;
   const activeView = polymarketState.view;
+  const activeBetType = polymarketState.betType;
 
   const tabButtons = Array.from(document.querySelectorAll('#polymarket-tabs .poly-tab'));
+  const betButtons = Array.from(document.querySelectorAll('#polymarket-bet-tabs .poly-bet-tab'));
   const viewButtons = Array.from(document.querySelectorAll('#polymarket-view-nav .poly-view-tab'));
   const categoryCounts = { all: allMarkets.length };
   allMarkets.forEach((m) => {
@@ -1196,10 +1250,28 @@ function renderPolymarketDashboard(btcTick, markets) {
   }
   if (activeQuery) {
     baseFiltered = baseFiltered.filter((m) => {
-      const haystack = `${m.title} ${m.category} ${m.status}`.toLowerCase();
+      const haystack = `${m.title} ${m.category} ${m.status} ${m.marketType}`.toLowerCase();
       return haystack.includes(activeQuery);
     });
   }
+
+  const betTypeCounts = {
+    all: baseFiltered.length,
+    up_down: baseFiltered.filter((m) => m.marketType === 'up_down').length,
+    above_below: baseFiltered.filter((m) => m.marketType === 'above_below').length,
+    price_range: baseFiltered.filter((m) => m.marketType === 'price_range').length,
+    hit_price: baseFiltered.filter((m) => m.marketType === 'hit_price').length,
+  };
+  betButtons.forEach((btn) => {
+    const value = String(btn.dataset.betType || 'all').toLowerCase();
+    const isActive = value === activeBetType;
+    const baseLabel = btn.dataset.baseLabel || btn.textContent.trim();
+    btn.dataset.baseLabel = baseLabel;
+    const count = Number(betTypeCounts[value] || 0);
+    btn.textContent = `${baseLabel.split(' (')[0]} (${count})`;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
 
   const viewCounts = {
     all: baseFiltered.length,
@@ -1219,6 +1291,9 @@ function renderPolymarketDashboard(btcTick, markets) {
   });
 
   let filtered = baseFiltered.slice();
+  if (activeBetType !== 'all') {
+    filtered = filtered.filter((m) => m.marketType === activeBetType);
+  }
   if (activeView === 'active') {
     filtered = filtered.filter((m) => m.status === 'active');
   } else if (activeView === 'ending') {
@@ -1364,9 +1439,28 @@ function renderPolymarketDashboard(btcTick, markets) {
     return;
   }
 
-  const top = filtered.slice(0, 24);
+  const top = filtered.slice(0, 48);
   listEl.innerHTML = top.map((market) => {
     const category = POLY_LABELS[market.category] || String(market.category || 'Other').toUpperCase();
+    const iconByCategory = {
+      trending: 'Tr',
+      breaking: 'Br',
+      new: 'Nw',
+      politics: 'Po',
+      finance: 'Fi',
+      oil: 'Oi',
+      geopolitics: 'Ge',
+      xauusd: 'Au',
+    };
+    const categoryIcon = iconByCategory[market.category] || 'Mk';
+    const typeLabelMap = {
+      all: 'General',
+      up_down: 'Up/Down',
+      above_below: 'Above/Below',
+      price_range: 'Price Range',
+      hit_price: 'Hit Price',
+    };
+    const typeLabel = typeLabelMap[market.marketType] || 'General';
     const yesText = Number.isFinite(market.yesPct) ? `${Math.round(market.yesPct)}c` : '--';
     const noText = Number.isFinite(market.noPct) ? `${Math.round(market.noPct)}c` : '--';
     const yesPctText = Number.isFinite(market.yesPct) ? `${market.yesPct.toFixed(1)}%` : '--';
@@ -1401,8 +1495,12 @@ function renderPolymarketDashboard(btcTick, markets) {
     return `
       <article class="polymarket-card">
         <div class="polymarket-card__head">
-          <div class="polymarket-card__title">${escapeHtml(market.title)}</div>
-          <span class="polymarket-card__cat">${escapeHtml(category)}</span>
+          <div class="polymarket-card__asset">${escapeHtml(categoryIcon)}</div>
+          <div class="polymarket-card__title-wrap">
+            <div class="polymarket-card__title">${escapeHtml(market.title)}</div>
+            <div class="polymarket-card__catline">${escapeHtml(category)} | ${escapeHtml(typeLabel)}</div>
+          </div>
+          <span class="polymarket-card__status ${statusClass}">${statusText}</span>
         </div>
         <div class="polymarket-card__odds">
           <div class="poly-odd poly-odd--yes">
@@ -1424,12 +1522,9 @@ function renderPolymarketDashboard(btcTick, markets) {
           <span class="poly-prob-fill" style="width:${probWidth.toFixed(1)}%"></span>
         </div>
         <div class="polymarket-card__meta">
-          <span>YES: ${yesPctText}</span>
-          <span>NO: ${noPctText}</span>
           <span>Volume: ${volText}</span>
           <span>Liquidity: ${liqText}</span>
           <span>Ends: ${endText}</span>
-          <span class="polymarket-card__status ${statusClass}">${statusText}</span>
         </div>
       </article>
     `;
@@ -1631,7 +1726,7 @@ function renderDemoDashboard(perf, curve = [], trades = []) {
       const laneText = String(t.lane || 'intraday').toUpperCase();
       const statusText = String(t.status || '--').toUpperCase();
       const pnl = Number(t.pnl_usd || 0);
-      const pnlCls = pnl >= 0 ? 'profit' : 'loss';
+      const pnlCls = statusText === 'BREAKEVEN' ? 'text-muted' : (pnl >= 0 ? 'profit' : 'loss');
       return `
         <div class="demo-trade-row">
           <div class="demo-trade-row__left">

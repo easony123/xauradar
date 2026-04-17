@@ -194,7 +194,7 @@
           <div class="card signal-section signal-section--levels">
             <div class="card__header"><span class="card__title">Trade Levels</span></div>
             <div class="card__body">
-              <div class="feature-note">Beginner note: Entry = open price, TP = target profit, SL = stop loss.</div>
+              <div class="feature-note">Beginner note: Entry = open price, TP = target profit, SL = stop loss. Pip unit here: 1p = $0.10.</div>
               <div class="trade-levels-setup trade-levels-setup--neutral" id="trade-levels-context">
                 <span class="trade-levels-setup__title">Setup</span>
                 <span class="trade-levels-setup__value">--</span>
@@ -239,6 +239,17 @@
         </section>
 
         <section class="page page--polymarket" id="page-polymarket">
+          <div class="poly-topic-nav" id="polymarket-topic-nav" aria-label="Polymarket topics">
+            <button type="button" class="poly-topic active">Trending</button>
+            <button type="button" class="poly-topic">Breaking</button>
+            <button type="button" class="poly-topic">New</button>
+            <button type="button" class="poly-topic">Politics</button>
+            <button type="button" class="poly-topic">Finance</button>
+            <button type="button" class="poly-topic">Geopolitics</button>
+            <button type="button" class="poly-topic">Oil</button>
+            <button type="button" class="poly-topic">XAUUSD</button>
+          </div>
+
           <div class="poly-overview-bar">
             <div class="poly-overview-main">
               <div class="polymarket-btc">
@@ -282,11 +293,22 @@
 
           <div class="poly-tabs" id="polymarket-tabs" role="tablist" aria-label="Polymarket categories">
             <button type="button" class="poly-tab active" data-category="all" role="tab" aria-selected="true">All</button>
-            <button type="button" class="poly-tab" data-category="crypto" role="tab" aria-selected="false">Crypto</button>
-            <button type="button" class="poly-tab" data-category="gold" role="tab" aria-selected="false">Gold</button>
+            <button type="button" class="poly-tab" data-category="trending" role="tab" aria-selected="false">Trending</button>
+            <button type="button" class="poly-tab" data-category="breaking" role="tab" aria-selected="false">Breaking</button>
+            <button type="button" class="poly-tab" data-category="new" role="tab" aria-selected="false">New</button>
+            <button type="button" class="poly-tab" data-category="politics" role="tab" aria-selected="false">Politics</button>
+            <button type="button" class="poly-tab" data-category="finance" role="tab" aria-selected="false">Finance</button>
             <button type="button" class="poly-tab" data-category="oil" role="tab" aria-selected="false">Oil</button>
             <button type="button" class="poly-tab" data-category="geopolitics" role="tab" aria-selected="false">Geopolitics</button>
-            <button type="button" class="poly-tab" data-category="fed" role="tab" aria-selected="false">Fed</button>
+            <button type="button" class="poly-tab" data-category="xauusd" role="tab" aria-selected="false">XAUUSD</button>
+          </div>
+
+          <div class="poly-bet-tabs" id="polymarket-bet-tabs" role="tablist" aria-label="Market type">
+            <button type="button" class="poly-bet-tab active" data-bet-type="all" role="tab" aria-selected="true">All</button>
+            <button type="button" class="poly-bet-tab" data-bet-type="up_down" role="tab" aria-selected="false">Up / Down</button>
+            <button type="button" class="poly-bet-tab" data-bet-type="above_below" role="tab" aria-selected="false">Above / Below</button>
+            <button type="button" class="poly-bet-tab" data-bet-type="price_range" role="tab" aria-selected="false">Price Range</button>
+            <button type="button" class="poly-bet-tab" data-bet-type="hit_price" role="tab" aria-selected="false">Hit Price</button>
           </div>
 
           <div class="poly-view-nav" id="polymarket-view-nav" role="tablist" aria-label="Polymarket view filter">
