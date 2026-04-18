@@ -31,12 +31,14 @@ const POLYMARKET_COLLECTOR_CRON_SECRET = Deno.env.get("POLYMARKET_COLLECTOR_CRON
 const COINGECKO_API_KEY = Deno.env.get("COINGECKO_API_KEY") ?? "";
 const POLYMARKET_BASE_URL = Deno.env.get("POLYMARKET_BASE_URL") ?? "https://gamma-api.polymarket.com";
 const TOP_MARKETS_LIMIT = Number(Deno.env.get("POLYMARKET_TOP_MARKETS_LIMIT") ?? 15) || 15;
+const ACTIVE_MARKETS_LIMIT = Number(Deno.env.get("POLYMARKET_ACTIVE_MARKETS_LIMIT") ?? 180) || 180;
 const COMMODITIES_EVENTS_LIMIT = Number(Deno.env.get("POLYMARKET_COMMODITIES_EVENTS_LIMIT") ?? 120) || 120;
 const RECENT_MARKETS_LIMIT = Number(Deno.env.get("POLYMARKET_RECENT_MARKETS_LIMIT") ?? 30) || 30;
 const CATEGORY_PRIORITY: Record<string, number> = {
   xauusd: 80,
   oil: 75,
   geopolitics: 70,
+  crypto: 68,
   politics: 65,
   finance: 60,
   breaking: 50,
@@ -94,18 +96,28 @@ function classifyContentCategory(text: string): string {
   if (/\b(breaking|headline|urgent)\b/.test(t)) return "breaking";
   if (/\b(xauusd|xau|spot gold|gold price|bullion|precious metal)\b/.test(t)) return "xauusd";
   if (/\b(oil|brent|wti|crude|opec|energy)\b/.test(t)) return "oil";
+  if (/\b(bitcoin|btc|ethereum|eth|solana|sol|crypto|token|coin|doge|memecoin|altcoin|defi|stablecoin|nft)\b/.test(t)) return "crypto";
   if (/\b(politics|election|president|senate|congress|minister|government|white house|parliament|trump|biden)\b/.test(t)) return "politics";
   if (/\b(war|ukraine|russia|israel|gaza|taiwan|geopolitic|missile|sanction|ceasefire|conflict|putin|xi jinping|iran|nato|military)\b/.test(t)) return "geopolitics";
   if (/\b(finance|financial|fomc|fed|powell|rate cut|rate hike|interest rate|us rates|cpi|pce|nfp|inflation|gdp|economy|tariff|yield|stocks|nasdaq|dow|s&p|bond|dollar|usd|bitcoin|btc|ethereum|eth|solana|crypto|token|coin|doge|memecoin|altcoin|defi|etf)\b/.test(t)) return "finance";
   return "other";
 }
 
+function deriveDisplayCategories(text: string, sourceTag: string, rawCategory = ""): string[] {
+  const blob = `${rawCategory} ${text}`.toLowerCase();
+  const categories: string[] = [];
+  const content = classifyContentCategory(blob);
+  if (content !== "other") categories.push(content);
+  if (/\b(breaking|headline|urgent|flash|developing)\b/.test(blob)) categories.push("breaking");
+  if (sourceTag === "recent") categories.push("new");
+  if (sourceTag === "top") categories.push("trending");
+  if (sourceTag === "active" && categories.length === 0) categories.push("trending");
+  return Array.from(new Set(categories.length ? categories : ["other"]));
+}
+
 function chooseDisplayCategory(text: string, sourceTag: string, rawCategory = ""): string {
-  const content = classifyContentCategory(`${rawCategory} ${text}`);
-  if (["xauusd", "oil", "politics", "finance", "geopolitics", "breaking"].includes(content)) return content;
-  if (sourceTag === "recent") return "new";
-  if (sourceTag === "top") return "trending";
-  return content;
+  const categories = deriveDisplayCategories(text, sourceTag, rawCategory);
+  return categories.sort((a, b) => (CATEGORY_PRIORITY[b] ?? 0) - (CATEGORY_PRIORITY[a] ?? 0))[0] ?? "other";
 }
 
 function slugify(value: string): string {
@@ -180,7 +192,7 @@ function normalizePolymarketRow(row: Record<string, unknown>, sourceTag = "top")
   }).join(" ");
 
   const rawCategory = String(row.category ?? "").trim().toLowerCase() || "other";
-  const displayCategory = chooseDisplayCategory([
+  const displayCategories = deriveDisplayCategories([
     title,
     String(row.description ?? ""),
     rawCategory,
@@ -188,6 +200,7 @@ function normalizePolymarketRow(row: Record<string, unknown>, sourceTag = "top")
     String(row.topic ?? ""),
     tagText,
   ].join(" "), sourceTag, rawCategory);
+  const displayCategory = displayCategories.sort((a, b) => (CATEGORY_PRIORITY[b] ?? 0) - (CATEGORY_PRIORITY[a] ?? 0))[0] ?? "other";
 
   const slugRaw = String(row.slug ?? row.market_slug ?? row.id ?? "").trim();
   const marketSlug = slugRaw || `${displayCategory}-${slugify(title)}`;
@@ -215,6 +228,7 @@ function normalizePolymarketRow(row: Record<string, unknown>, sourceTag = "top")
       outcomes: row.outcomes ?? null,
       raw_category: rawCategory,
       display_category: displayCategory,
+      display_categories: displayCategories,
       collector_source: sourceTag,
     },
   };
@@ -248,6 +262,20 @@ async function fetchTopVolumeMarkets(): Promise<PolymarketRow[]> {
   if (!Array.isArray(data)) return [];
   return data
     .map((item) => normalizePolymarketRow(item as Record<string, unknown>, "top"))
+    .filter((item): item is PolymarketRow => item !== null);
+}
+
+async function fetchActiveMarkets(): Promise<PolymarketRow[]> {
+  const data = await fetchJson("/markets", {
+    active: "true",
+    closed: "false",
+    order: "volumeNum",
+    ascending: "false",
+    limit: String(ACTIVE_MARKETS_LIMIT),
+  });
+  if (!Array.isArray(data)) return [];
+  return data
+    .map((item) => normalizePolymarketRow(item as Record<string, unknown>, "active"))
     .filter((item): item is PolymarketRow => item !== null);
 }
 
@@ -342,13 +370,14 @@ Deno.serve(async (req) => {
 
   const supabase = createClient(PROJECT_URL, SERVICE_ROLE_KEY);
 
-  const [btcTick, topRows, recentRows, commodityRows] = await Promise.all([
+  const [btcTick, topRows, activeRows, recentRows, commodityRows] = await Promise.all([
     fetchBtcTick(),
     fetchTopVolumeMarkets(),
+    fetchActiveMarkets(),
     fetchRecentMarkets(),
     fetchCommodityEventMarkets(),
   ]);
-  const rows = mergeMarkets(topRows, recentRows, commodityRows);
+  const rows = mergeMarkets(topRows, activeRows, recentRows, commodityRows);
 
   let btcWritten = false;
   if (btcTick) {
@@ -405,6 +434,7 @@ Deno.serve(async (req) => {
     markets_written: marketsWritten,
     markets_fetched: rows.length,
     top_markets: topRows.length,
+    active_markets: activeRows.length,
     recent_markets: recentRows.length,
     commodity_markets: commodityRows.length,
   });

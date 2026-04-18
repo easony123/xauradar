@@ -74,6 +74,8 @@ DAILY_COOLDOWN_MINUTES = 90
 
 ASIAN_SESSION_START_HOUR = 0
 ASIAN_SESSION_END_HOUR = 8
+MARKET_REOPEN_SUNDAY_UTC_HOUR = 22
+MARKET_CLOSE_FRIDAY_UTC_HOUR = 22
 
 
 @dataclass
@@ -542,8 +544,41 @@ def calculate_confirm_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def get_market_clock_context(now: datetime | None = None) -> dict:
+    current = now or datetime.now(timezone.utc)
+    weekday = current.weekday()
+    total_minutes = current.hour * 60 + current.minute
+    reopen_minutes = MARKET_REOPEN_SUNDAY_UTC_HOUR * 60
+    friday_close_minutes = MARKET_CLOSE_FRIDAY_UTC_HOUR * 60
+
+    market_open = True
+    reason = "OPEN"
+    if weekday == 5:
+        market_open = False
+        reason = "SATURDAY_CLOSED"
+    elif weekday == 6 and total_minutes < reopen_minutes:
+        market_open = False
+        reason = "SUNDAY_PREOPEN"
+    elif weekday == 4 and total_minutes >= friday_close_minutes:
+        market_open = False
+        reason = "FRIDAY_AFTER_CLOSE"
+
+    return {
+        "market_open": market_open,
+        "reason": reason,
+        "weekday": weekday,
+        "utc_hour": current.hour,
+        "utc_minute": current.minute,
+    }
+
+
 def get_session_context() -> dict:
-    h = datetime.now(timezone.utc).hour
+    now = datetime.now(timezone.utc)
+    market_clock = get_market_clock_context(now)
+    if not market_clock["market_open"]:
+        return {"name": "MARKET_CLOSED", "is_asia": False, "is_overlap": False, "market_open": False}
+
+    h = now.hour
     is_asia = 0 <= h < 8
     is_london = 7 <= h < 16
     is_ny = 12 <= h < 21
@@ -558,7 +593,7 @@ def get_session_context() -> dict:
         name = "NEW_YORK"
     else:
         name = "OFF_HOURS"
-    return {"name": name, "is_asia": is_asia, "is_overlap": is_overlap}
+    return {"name": name, "is_asia": is_asia, "is_overlap": is_overlap, "market_open": True}
 
 
 def get_news_context() -> dict:
@@ -842,8 +877,10 @@ def apply_demo_tp1_partial(signal_row: dict, tp1_price: float, now_iso: str | No
 def create_demo_trades_for_signal(signal_row: dict) -> None:
     signal_id = signal_row.get("id")
     if not signal_id:
+        print("  Demo trade sync skipped: signal row missing id.")
         return
     if str(signal_row.get("status", "")).upper() != "ACTIVE":
+        print(f"  Demo trade sync skipped: signal {signal_id} status is {signal_row.get('status')}.")
         return
 
     try:
@@ -855,10 +892,12 @@ def create_demo_trades_for_signal(signal_row: dict) -> None:
         )
         accounts = accounts_resp.data or []
     except Exception as e:
-        print(f"  WARNING: demo account query failed: {e}")
+        print(f"  WARNING: demo account query failed for signal {signal_id}: {type(e).__name__}: {e}")
         return
 
+    print(f"  Demo auto-trade accounts eligible for {signal_id}: {len(accounts)}")
     if not accounts:
+        print(f"  Demo trade sync skipped: no eligible demo accounts for signal {signal_id}.")
         return
 
     try:
@@ -869,7 +908,9 @@ def create_demo_trades_for_signal(signal_row: dict) -> None:
             .execute()
         )
         existing_users = {row.get("user_id") for row in (existing_resp.data or []) if row.get("user_id")}
-    except Exception:
+        print(f"  Existing demo trade users for {signal_id}: {len(existing_users)}")
+    except Exception as e:
+        print(f"  WARNING: existing demo trade lookup failed for signal {signal_id}: {type(e).__name__}: {e}")
         existing_users = set()
 
     entry = safe_float(signal_row.get("entry_price"), 0)
@@ -882,10 +923,18 @@ def create_demo_trades_for_signal(signal_row: dict) -> None:
     signal_risk_pct = safe_float(signal_row.get("risk_percent_used"), 0.5)
     now_iso = datetime.now(timezone.utc).isoformat()
 
+    if entry <= 0 or sl <= 0:
+        print(f"  WARNING: demo trade sync skipped for {signal_id}: invalid entry/sl ({entry}, {sl})")
+        return
+
     created = 0
     for account in accounts:
         user_id = account.get("user_id")
-        if not user_id or user_id in existing_users:
+        if not user_id:
+            print(f"  WARNING: demo account row missing user_id for signal {signal_id}.")
+            continue
+        if user_id in existing_users:
+            print(f"  Demo trade already exists for user {user_id} signal {signal_id}")
             continue
 
         risk_model = parse_json_object(account.get("risk_model"))
@@ -927,6 +976,7 @@ def create_demo_trades_for_signal(signal_row: dict) -> None:
                 "partial_fills": [],
             },
         }
+        print(f"  Demo trade payload for user {user_id}: {_dump_json(row)}")
         try:
             insert_resp = supabase.table("demo_trades").insert(row).select("id").execute()
             inserted_trade = (insert_resp.data or [None])[0] if insert_resp else None
@@ -946,10 +996,21 @@ def create_demo_trades_for_signal(signal_row: dict) -> None:
                 meta={"side": side},
             )
         except Exception as e:
-            print(f"  WARNING: demo trade insert failed for user {user_id}: {e}")
+            print(f"  WARNING: demo trade insert failed for user {user_id}: {type(e).__name__}: {e}")
+            print(f"  Failed payload for user {user_id}: {_dump_json(row)}")
 
     if created > 0:
         print(f"  Demo trades opened: {created}")
+    else:
+        print(f"  Demo trade sync complete: no new demo trades created for signal {signal_id}.")
+
+
+def sync_demo_trades_for_active_signals(active_by_lane: dict[str, dict]) -> None:
+    for lane_name, active_signal in active_by_lane.items():
+        if str(active_signal.get("status", "")).upper() != "ACTIVE":
+            continue
+        print(f"  Demo backfill check for active lane {lane_name} signal {active_signal.get('id')}")
+        create_demo_trades_for_signal(active_signal)
 
 
 def settle_demo_trades_for_signal(signal_row: dict, closed_status: str, current_price: float) -> None:
@@ -1548,6 +1609,13 @@ def run_signal_engine() -> None:
     print(f"Signal Engine v2 - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print(f"{'=' * 62}")
 
+    market_clock = get_market_clock_context()
+    active_by_lane = check_active_signals_by_lane()
+    sync_demo_trades_for_active_signals(active_by_lane)
+    if not market_clock["market_open"]:
+        print(f"  Market closed ({market_clock['reason']}): skipping candle fetch, signal generation, and signal expiry checks.")
+        return
+
     df_m15 = fetch_candles("XAU/USD", 15, "minute")
     df_h1 = fetch_candles("XAU/USD", 1, "hour")
     df_h4 = fetch_candles("XAU/USD", 4, "hour")
@@ -1577,11 +1645,11 @@ def run_signal_engine() -> None:
     print(f"  Price: {current_price:.2f} | Spread: {spread_info.get('spread')} | Session: {session['name']}")
     print(f"  News(high={news['high_blackout']}, medium={news['medium_penalty']}) | Expectancy50={exp50:.3f} | Adaptive exits ON")
 
-    active_by_lane = check_active_signals_by_lane()
     for lane_name, active_signal in list(active_by_lane.items()):
         updated_signal = manage_active_signal(active_signal, current_price)
         if str(updated_signal.get("status", "")).upper() == "ACTIVE":
             active_by_lane[lane_name] = updated_signal
+            create_demo_trades_for_signal(updated_signal)
         else:
             active_by_lane.pop(lane_name, None)
 

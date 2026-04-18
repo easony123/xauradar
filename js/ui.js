@@ -7,6 +7,8 @@ const APP_TZ_LABEL = 'MYT';
 const THEME_KEY = 'xauradar_theme';
 const XAU_PIP_SIZE = 0.1;
 const LANG_KEY = 'xauradar_lang';
+const GOOGLE_TRANSLATE_SCRIPT_ID = 'xauradar-google-translate-script';
+const GOOGLE_TRANSLATE_CALLBACK = '__xauRadarGoogleTranslateInit';
 const DASHBOARD_MODE_KEY = 'xauradar_dashboard_mode';
 const SIGNAL_LANE_KEY = 'xauradar_signal_lane';
 const POLY_CATEGORY_KEY = 'xauradar_poly_category';
@@ -25,7 +27,7 @@ const polymarketState = {
   view: 'all',
   betType: 'all',
 };
-const POLY_CATEGORIES = ['all', 'trending', 'breaking', 'new', 'politics', 'finance', 'geopolitics', 'oil', 'xauusd'];
+const POLY_CATEGORIES = ['all', 'trending', 'breaking', 'new', 'politics', 'crypto', 'finance', 'geopolitics', 'oil', 'xauusd'];
 const POLY_SORT_OPTIONS = ['volume', 'liquidity', 'ending', 'probability'];
 const POLY_VIEW_OPTIONS = ['all', 'active', 'ending', 'resolved'];
 const POLY_BET_TYPE_OPTIONS = ['all', 'up_down', 'above_below', 'price_range', 'hit_price'];
@@ -35,11 +37,14 @@ const POLY_LABELS = {
   breaking: 'Breaking',
   new: 'New',
   politics: 'Politics',
+  crypto: 'Crypto',
   finance: 'Finance',
   oil: 'Oil',
   geopolitics: 'Geopolitics',
   xauusd: 'XAUUSD',
 };
+
+let googleTranslateLoader = null;
 
 function getSelectedSignalLane() {
   return String(localStorage.getItem(SIGNAL_LANE_KEY) || 'intraday').toLowerCase() === 'swing' ? 'swing' : 'intraday';
@@ -298,10 +303,32 @@ function normalizePolymarketCategory(rawCategory, titleText = '', meta = null) {
   if (/(new|fresh|latest|launched|launch)/.test(text)) return 'new';
   if (/(xauusd|xau|spot gold|gold price|bullion|precious metal)/.test(text)) return 'xauusd';
   if (/(oil|wti|brent|crude|opec|energy)/.test(text)) return 'oil';
+  if (/(bitcoin|btc|ethereum|eth|solana|sol|crypto|token|coin|doge|memecoin|altcoin|defi|stablecoin|nft)/.test(text)) return 'crypto';
   if (/(politics|election|president|senate|congress|minister|party|government|white house|parliament|trump|biden|campaign|vote|voting)/.test(text)) return 'politics';
   if (/(war|geopolitic|geopolitics|conflict|russia|ukraine|china|taiwan|israel|middle east|iran|sanction|ceasefire|military|nato|putin|xi jinping|gaza|hezbollah)/.test(text)) return 'geopolitics';
   if (/(fomc|fed|powell|rate|cpi|inflation|nfp|jobs|yield|treasury|tariff|economy|recession|gdp|finance|financial|stocks|nasdaq|s&p|dow|bond|dollar|usd|bitcoin|btc|ethereum|eth|solana|crypto|token|coin|doge|memecoin|altcoin|defi|etf)/.test(text)) return 'finance';
   return 'other';
+}
+
+function normalizePolymarketCategories(rawCategory, titleText = '', meta = null) {
+  const visible = new Set();
+  const fromMeta = Array.isArray(meta?.display_categories)
+    ? meta.display_categories
+    : Array.isArray(meta?.displayCategories)
+      ? meta.displayCategories
+      : [];
+
+  fromMeta
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter((value) => POLY_CATEGORIES.includes(value) && value !== 'all')
+    .forEach((value) => visible.add(value));
+
+  const primary = normalizePolymarketCategory(rawCategory, titleText, meta);
+  if (primary && primary !== 'other') {
+    visible.add(primary);
+  }
+
+  return Array.from(visible);
 }
 
 function classifyBetType(titleText = '') {
@@ -329,6 +356,7 @@ function normalizePolymarketRow(row) {
   const title = String(row?.title || row?.question || 'Untitled market');
   const meta = row?.meta && typeof row.meta === 'object' ? row.meta : null;
   const category = normalizePolymarketCategory(row?.category, title, meta);
+  const categories = normalizePolymarketCategories(row?.category, title, meta);
   const marketType = classifyBetType(title);
   const probability = clamp01To100(normalizePercent(row?.probability));
 
@@ -349,7 +377,8 @@ function normalizePolymarketRow(row) {
   return {
     ...row,
     title,
-    category,
+    category: category === 'other' && categories[0] ? categories[0] : category,
+    categories,
     rawCategory: String(meta?.raw_category || row?.category || 'other').trim().toLowerCase() || 'other',
     marketType,
     probability,
@@ -405,7 +434,7 @@ function initPolymarketControls() {
   setPolymarketCategory(savedCategory || 'all', { persist: false });
   setPolymarketSort(savedSort || 'volume', { persist: false });
   setPolymarketView(savedView || 'all', { persist: false });
-  setPolymarketBetType(savedBetType || 'all', { persist: false });
+  setPolymarketBetType(betTabs.length ? (savedBetType || 'all') : 'all', { persist: false });
 
   if (sortSelect) sortSelect.value = polymarketState.sort;
 
@@ -474,29 +503,156 @@ function setGoogTransCookie(value) {
   }
 }
 
+function getPreferredLanguage() {
+  const saved = localStorage.getItem(LANG_KEY);
+  const cookie = getCurrentGoogTrans();
+  if (saved === 'zh-CN' || cookie.includes('/zh-CN')) {
+    return 'zh-CN';
+  }
+  return 'en';
+}
+
 function applyTranslateToggleLabel(btn, lang) {
   if (!btn) return;
-  btn.textContent = lang === 'zh-CN' ? 'EN' : 'ä¸­æ–‡';
+  btn.textContent = lang === 'zh-CN' ? 'EN' : '中文';
   btn.setAttribute('aria-label', lang === 'zh-CN' ? 'Switch language to English' : 'Switch language to Chinese');
+}
+
+function ensureGoogleTranslateWidget() {
+  if (googleTranslateLoader) return googleTranslateLoader;
+
+  googleTranslateLoader = new Promise((resolve) => {
+    const container = document.getElementById('google_translate_element');
+    if (!container) {
+      console.warn('Google Translate container is missing.');
+      resolve(false);
+      return;
+    }
+
+    const initWidget = () => {
+      try {
+        if (!window.google?.translate?.TranslateElement) {
+          console.warn('Google Translate API is unavailable after script load.');
+          resolve(false);
+          return;
+        }
+
+        if (!container.dataset.ready) {
+          container.innerHTML = '';
+          new window.google.translate.TranslateElement(
+            {
+              pageLanguage: 'en',
+              includedLanguages: 'en,zh-CN',
+              autoDisplay: false,
+              multilanguagePage: false,
+              layout: window.google.translate.TranslateElement.InlineLayout.SIMPLE,
+            },
+            'google_translate_element'
+          );
+          container.dataset.ready = '1';
+        }
+
+        window.setTimeout(() => resolve(true), 150);
+      } catch (err) {
+        console.warn('Failed to initialize Google Translate widget:', err?.message || err);
+        resolve(false);
+      }
+    };
+
+    if (window.google?.translate?.TranslateElement) {
+      initWidget();
+      return;
+    }
+
+    const existingScript = document.getElementById(GOOGLE_TRANSLATE_SCRIPT_ID);
+    window[GOOGLE_TRANSLATE_CALLBACK] = initWidget;
+
+    if (existingScript) {
+      window.setTimeout(() => {
+        if (window.google?.translate?.TranslateElement) {
+          initWidget();
+        } else {
+          console.warn('Google Translate script is present but widget did not initialize.');
+          resolve(false);
+        }
+      }, 800);
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.id = GOOGLE_TRANSLATE_SCRIPT_ID;
+    script.async = true;
+    script.src = `https://translate.google.com/translate_a/element.js?cb=${GOOGLE_TRANSLATE_CALLBACK}`;
+    script.onerror = () => {
+      console.warn('Google Translate script failed to load.');
+      resolve(false);
+    };
+    document.head.appendChild(script);
+  });
+
+  return googleTranslateLoader;
+}
+
+function syncGoogleTranslateLanguage(lang) {
+  const normalized = lang === 'zh-CN' ? 'zh-CN' : 'en';
+  setGoogTransCookie(normalized === 'zh-CN' ? '/en/zh-CN' : '/en/en');
+
+  const combo = document.querySelector('#google_translate_element select.goog-te-combo');
+  if (!combo) return false;
+
+  if (combo.value !== normalized) {
+    combo.value = normalized;
+    combo.dispatchEvent(new Event('change', { bubbles: true }));
+    combo.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  return true;
+}
+
+async function applyTranslateLanguage(lang, { persist = true } = {}) {
+  const normalized = lang === 'zh-CN' ? 'zh-CN' : 'en';
+  const btn = document.getElementById('translate-toggle');
+  if (persist) {
+    localStorage.setItem(LANG_KEY, normalized);
+  }
+  applyTranslateToggleLabel(btn, normalized);
+
+  const ready = await ensureGoogleTranslateWidget();
+  if (!ready) {
+    console.warn('Google Translate widget is unavailable; keeping readable toggle only.');
+    return false;
+  }
+
+  const synced = syncGoogleTranslateLanguage(normalized);
+  if (!synced) {
+    console.warn('Google Translate widget did not expose the language selector.');
+    return false;
+  }
+  return true;
 }
 
 function initTranslateToggle() {
   const btn = document.getElementById('translate-toggle');
   if (!btn) return;
 
-  let lang = 'en';
-  const saved = localStorage.getItem(LANG_KEY);
-  const cookie = getCurrentGoogTrans();
-  if (saved === 'zh-CN' || cookie.includes('/zh-CN')) {
-    lang = 'zh-CN';
-  }
+  let lang = getPreferredLanguage();
   applyTranslateToggleLabel(btn, lang);
+  applyTranslateLanguage(lang, { persist: false });
 
-  btn.addEventListener('click', () => {
+  if (btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
+
+  btn.addEventListener('click', async () => {
     const next = lang === 'zh-CN' ? 'en' : 'zh-CN';
-    localStorage.setItem(LANG_KEY, next);
-    setGoogTransCookie(next === 'zh-CN' ? '/en/zh-CN' : '/en/en');
-    window.location.reload();
+    btn.disabled = true;
+    try {
+      const ok = await applyTranslateLanguage(next);
+      lang = next;
+      if (!ok) {
+        applyTranslateToggleLabel(btn, next);
+      }
+    } finally {
+      btn.disabled = false;
+    }
   });
 }
 
@@ -641,6 +797,12 @@ function updateSessionPill() {
   const utcH = now.getUTCHours();
   const utcM = now.getUTCMinutes();
   const total = utcH * 60 + utcM;
+  const weekday = now.getUTCDay(); // 0=Sun, 5=Fri, 6=Sat
+  const marketOpen = !(
+    weekday === 6
+    || (weekday === 0 && total < 22 * 60)
+    || (weekday === 5 && total >= 22 * 60)
+  );
 
   const sessions = [
     { name: 'Sydney', start: 21 * 60, end: 30 * 60, color: '#4f8cff' },
@@ -650,13 +812,15 @@ function updateSessionPill() {
   ];
 
   let active = null;
-  for (const s of sessions) {
-    const start = s.start % (24 * 60);
-    const end = s.end % (24 * 60);
-    const inside = start < end ? total >= start && total < end : total >= start || total < end;
-    if (inside) {
-      active = s;
-      break;
+  if (marketOpen) {
+    for (const s of sessions) {
+      const start = s.start % (24 * 60);
+      const end = s.end % (24 * 60);
+      const inside = start < end ? total >= start && total < end : total >= start || total < end;
+      if (inside) {
+        active = s;
+        break;
+      }
     }
   }
 
@@ -1225,22 +1389,21 @@ function renderNewsBanner(events) {
 function renderHistory(signals) {
   const container = document.getElementById('history-list');
   if (!container) return;
-  const successStatuses = new Set(['HIT_TP1', 'HIT_TP2', 'HIT_TP3']);
-  const successfulSignals = Array.isArray(signals)
-    ? signals.filter((s) => successStatuses.has(String(s.status || '').toUpperCase()))
+  const visibleSignals = Array.isArray(signals)
+    ? signals.filter((s) => String(s.status || '').toUpperCase() !== 'REJECTED')
     : [];
 
-  if (!successfulSignals || successfulSignals.length === 0) {
+  if (!visibleSignals || visibleSignals.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
-        <div class="empty-state__title">No successful signals yet</div>
-        <div class="empty-state__sub">Only TP-hit signals are shown in history</div>
+        <div class="empty-state__title">No signal history yet</div>
+        <div class="empty-state__sub">Active, breakeven, expired, TP, and SL signals will appear here.</div>
       </div>
     `;
     return;
   }
 
-  container.innerHTML = successfulSignals.map((s) => {
+  container.innerHTML = visibleSignals.map((s) => {
     const type = s.signal_type || s.type || 'WAIT';
     const entry = parseFloat(s.entry_price) || 0;
     const conf = s.confidence || 0;
@@ -1248,13 +1411,13 @@ function renderHistory(signals) {
     const lane = (s.lane || 'intraday').toUpperCase();
     const blockedReason = s.blocked_reason || '';
     const time = formatMalaysiaTime(s.created_at);
-    const status = (s.status || 'ACTIVE').replace('_', ' ');
+    const statusRaw = String(s.status || 'ACTIVE').toUpperCase();
+    const status = statusRaw.replace(/_/g, ' ');
 
     let statusCls = 'active';
-    if (status.includes('TP')) statusCls = 'hit-tp';
-    if (status.includes('SL')) statusCls = 'hit-sl';
-    if (status === 'EXPIRED') statusCls = 'expired';
-    if (status === 'REJECTED') statusCls = 'blocked';
+    if (statusRaw.startsWith('HIT_TP')) statusCls = 'hit-tp';
+    if (statusRaw === 'HIT_SL') statusCls = 'hit-sl';
+    if (statusRaw === 'BREAKEVEN' || statusRaw === 'EXPIRED') statusCls = 'expired';
 
     return `
       <div class="history-item">
@@ -1316,22 +1479,25 @@ function renderPolymarketDashboard(btcTick, markets) {
 
   const activeBtc = polymarketState.btcTick;
   const rawMarkets = Array.isArray(polymarketState.markets) ? polymarketState.markets : [];
-  const allMarkets = rawMarkets.filter((row) => POLY_CATEGORIES.includes(row.category) && row.category !== 'all');
+  const allMarkets = rawMarkets.filter((row) => Array.isArray(row.categories) && row.categories.some((cat) => POLY_CATEGORIES.includes(cat) && cat !== 'all'));
   const unmatchedCount = Math.max(0, rawMarkets.length - allMarkets.length);
   const activeCategory = polymarketState.category;
   const activeSort = polymarketState.sort;
   const activeQuery = polymarketState.query;
   const activeView = polymarketState.view;
-  const activeBetType = polymarketState.betType;
 
   const tabButtons = Array.from(document.querySelectorAll('#polymarket-tabs .poly-tab'));
   const betButtons = Array.from(document.querySelectorAll('#polymarket-bet-tabs .poly-bet-tab'));
   const viewButtons = Array.from(document.querySelectorAll('#polymarket-view-nav .poly-view-tab'));
+  const activeBetType = betButtons.length ? polymarketState.betType : 'all';
   const categoryCounts = { all: allMarkets.length };
   allMarkets.forEach((m) => {
-    if (POLY_CATEGORIES.includes(m.category)) {
-      categoryCounts[m.category] = (categoryCounts[m.category] || 0) + 1;
-    }
+    const rowCategories = Array.isArray(m.categories) ? m.categories : [];
+    rowCategories.forEach((cat) => {
+      if (POLY_CATEGORIES.includes(cat) && cat !== 'all') {
+        categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+      }
+    });
   });
   tabButtons.forEach((btn) => {
     const category = String(btn.dataset.category || 'all').toLowerCase();
@@ -1346,7 +1512,7 @@ function renderPolymarketDashboard(btcTick, markets) {
 
   let baseFiltered = allMarkets.slice();
   if (activeCategory !== 'all') {
-    baseFiltered = baseFiltered.filter((m) => m.category === activeCategory);
+    baseFiltered = baseFiltered.filter((m) => Array.isArray(m.categories) && m.categories.includes(activeCategory));
   }
   if (activeQuery) {
     baseFiltered = baseFiltered.filter((m) => {
@@ -1551,6 +1717,7 @@ function renderPolymarketDashboard(btcTick, markets) {
       breaking: 'Br',
       new: 'Nw',
       politics: 'Po',
+      crypto: '₿',
       finance: 'Fi',
       oil: 'Oi',
       geopolitics: 'Ge',
@@ -1827,7 +1994,7 @@ function renderDemoDashboard(perf, curve = [], trades = [], events = []) {
     history.innerHTML = '<div class="feature-note">No demo trades yet.</div>';
   } else if (eventRows.length > 0) {
     const eventLabels = {
-      OPEN: 'Opened',
+      OPEN: 'OPEN',
       TP1_PARTIAL: 'TP1 partial',
       SL_TO_BREAKEVEN: 'SL -> breakeven',
       TP2: 'TP2',

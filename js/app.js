@@ -16,6 +16,20 @@ let lastIndicatorSnapshot = null;
 let lastRiskState = null;
 window._lastPriceDirection = null;
 window.__currentSignal = null;
+const XAU_MARKET_REOPEN_SUNDAY_UTC_HOUR = 22;
+const XAU_MARKET_CLOSE_FRIDAY_UTC_HOUR = 22;
+
+function isXauMarketOpen(now = new Date()) {
+  const weekday = now.getUTCDay(); // 0=Sun, 5=Fri, 6=Sat
+  const totalMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const reopenMinutes = XAU_MARKET_REOPEN_SUNDAY_UTC_HOUR * 60;
+  const fridayCloseMinutes = XAU_MARKET_CLOSE_FRIDAY_UTC_HOUR * 60;
+
+  if (weekday === 6) return false;
+  if (weekday === 0) return totalMinutes >= reopenMinutes;
+  if (weekday === 5) return totalMinutes < fridayCloseMinutes;
+  return true;
+}
 
 function normalizeLane(lane) {
   return String(lane || 'intraday').toLowerCase() === 'swing' ? 'swing' : 'intraday';
@@ -164,7 +178,7 @@ function startPolling() {
   if (pollingStarted) return;
   pollingStarted = true;
 
-  pollPrice();
+  pollPrice(true);
   pollSupabase();
   pollDXY();
   pollPolymarket();
@@ -172,10 +186,11 @@ function startPolling() {
   setInterval(pollPrice, 30000);
   setInterval(pollSupabase, 30000);
   setInterval(pollDXY, 60000);
-  setInterval(pollPolymarket, 30000);
+  setInterval(pollPolymarket, 5000);
 }
 
-async function pollPrice() {
+async function pollPrice(force = false) {
+  if (!force && !isXauMarketOpen()) return;
   const data = await API.fetchLivePrice();
   if (!data || data.price <= 0) return;
 

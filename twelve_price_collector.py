@@ -29,6 +29,8 @@ if not REQUESTS_TRUST_ENV:
 
 HTTP = requests.Session()
 HTTP.trust_env = REQUESTS_TRUST_ENV
+MARKET_REOPEN_SUNDAY_UTC_HOUR = 22
+MARKET_CLOSE_FRIDAY_UTC_HOUR = 22
 
 
 def parse_float(value: Any) -> float | None:
@@ -69,6 +71,34 @@ def clamp_to_recent(provider_ts: datetime, max_age_minutes: int = 30) -> datetim
     if age_minutes > max_age_minutes:
         return now
     return provider_ts
+
+
+def get_market_clock_context(now: datetime | None = None) -> dict[str, Any]:
+    current = now or datetime.now(timezone.utc)
+    weekday = current.weekday()
+    total_minutes = current.hour * 60 + current.minute
+    reopen_minutes = MARKET_REOPEN_SUNDAY_UTC_HOUR * 60
+    friday_close_minutes = MARKET_CLOSE_FRIDAY_UTC_HOUR * 60
+
+    market_open = True
+    reason = "OPEN"
+    if weekday == 5:
+        market_open = False
+        reason = "SATURDAY_CLOSED"
+    elif weekday == 6 and total_minutes < reopen_minutes:
+        market_open = False
+        reason = "SUNDAY_PREOPEN"
+    elif weekday == 4 and total_minutes >= friday_close_minutes:
+        market_open = False
+        reason = "FRIDAY_AFTER_CLOSE"
+
+    return {
+        "market_open": market_open,
+        "reason": reason,
+        "weekday": weekday,
+        "utc_hour": current.hour,
+        "utc_minute": current.minute,
+    }
 
 
 def twelve_get(path: str, params: dict[str, Any]) -> dict[str, Any] | None:
@@ -201,6 +231,11 @@ def main() -> int:
 
     now_utc = datetime.now(timezone.utc).isoformat()
     print(f"Collector run start (UTC): {now_utc}")
+
+    market_clock = get_market_clock_context()
+    if not market_clock["market_open"]:
+        print(f"Collector skipped: market closed ({market_clock['reason']}). No upstream Twelve Data request made.")
+        return 0
 
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     tick = fetch_tick()
