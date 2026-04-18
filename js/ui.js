@@ -1487,9 +1487,7 @@ function renderPolymarketDashboard(btcTick, markets) {
   const activeView = polymarketState.view;
 
   const tabButtons = Array.from(document.querySelectorAll('#polymarket-tabs .poly-tab'));
-  const betButtons = Array.from(document.querySelectorAll('#polymarket-bet-tabs .poly-bet-tab'));
   const viewButtons = Array.from(document.querySelectorAll('#polymarket-view-nav .poly-view-tab'));
-  const activeBetType = betButtons.length ? polymarketState.betType : 'all';
   const categoryCounts = { all: allMarkets.length };
   allMarkets.forEach((m) => {
     const rowCategories = Array.isArray(m.categories) ? m.categories : [];
@@ -1499,6 +1497,7 @@ function renderPolymarketDashboard(btcTick, markets) {
       }
     });
   });
+
   tabButtons.forEach((btn) => {
     const category = String(btn.dataset.category || 'all').toLowerCase();
     const isActive = category === activeCategory;
@@ -1521,24 +1520,6 @@ function renderPolymarketDashboard(btcTick, markets) {
     });
   }
 
-  const betTypeCounts = {
-    all: baseFiltered.length,
-    up_down: baseFiltered.filter((m) => m.marketType === 'up_down').length,
-    above_below: baseFiltered.filter((m) => m.marketType === 'above_below').length,
-    price_range: baseFiltered.filter((m) => m.marketType === 'price_range').length,
-    hit_price: baseFiltered.filter((m) => m.marketType === 'hit_price').length,
-  };
-  betButtons.forEach((btn) => {
-    const value = String(btn.dataset.betType || 'all').toLowerCase();
-    const isActive = value === activeBetType;
-    const baseLabel = btn.dataset.baseLabel || btn.textContent.trim();
-    btn.dataset.baseLabel = baseLabel;
-    const count = Number(betTypeCounts[value] || 0);
-    btn.textContent = `${baseLabel.split(' (')[0]} (${count})`;
-    btn.classList.toggle('active', isActive);
-    btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
-  });
-
   const viewCounts = {
     all: baseFiltered.length,
     active: baseFiltered.filter((m) => m.status === 'active').length,
@@ -1557,9 +1538,6 @@ function renderPolymarketDashboard(btcTick, markets) {
   });
 
   let filtered = baseFiltered.slice();
-  if (activeBetType !== 'all') {
-    filtered = filtered.filter((m) => m.marketType === activeBetType);
-  }
   if (activeView === 'active') {
     filtered = filtered.filter((m) => m.status === 'active');
   } else if (activeView === 'ending') {
@@ -1584,6 +1562,30 @@ function renderPolymarketDashboard(btcTick, markets) {
   };
   filtered.sort(sorters[activeSort] || sorters.volume);
 
+  const activeMarkets = allMarkets.filter((m) => m.status === 'active').slice().sort(sorters.volume);
+  const breakingMarkets = activeMarkets.filter((market) => {
+    const text = `${market.title} ${(market.categories || []).join(' ')} ${market.rawCategory || ''}`.toLowerCase();
+    return (market.categories || []).includes('breaking') || /(breaking|urgent|headline|flash|developing|war|ceasefire|meeting|tariff|fed|rate cut|diplomatic)/.test(text);
+  }).slice(0, 5);
+
+  const featuredMarket = filtered.find((market) => market.status === 'active') || filtered[0] || activeMarkets[0] || allMarkets[0] || null;
+  const spotlightMarkets = filtered.filter((market) => !featuredMarket || market.title !== featuredMarket.title).slice(0, 4);
+
+  const topicRows = POLY_CATEGORIES
+    .filter((category) => category !== 'all')
+    .map((category) => {
+      const rows = activeMarkets.filter((market) => Array.isArray(market.categories) && market.categories.includes(category));
+      return {
+        category,
+        label: POLY_LABELS[category] || category,
+        count: rows.length,
+        volume: rows.reduce((sum, row) => sum + (Number.isFinite(row.volume) ? row.volume : 0), 0),
+      };
+    })
+    .filter((row) => row.count > 0)
+    .sort((a, b) => b.count - a.count || b.volume - a.volume)
+    .slice(0, 6);
+
   const btcPriceEl = document.getElementById('polymarket-btc-price');
   const btcChangeEl = document.getElementById('polymarket-btc-change');
   const syncEl = document.getElementById('polymarket-last-sync');
@@ -1591,8 +1593,11 @@ function renderPolymarketDashboard(btcTick, markets) {
   const kpiVolEl = document.getElementById('polymarket-kpi-volume');
   const kpiEndingEl = document.getElementById('polymarket-kpi-ending');
   const diagnosticsEl = document.getElementById('polymarket-diagnostics');
-  const trendEl = document.getElementById('polymarket-trending-list');
   const listEl = document.getElementById('polymarket-markets-list');
+  const breakingEl = document.getElementById('polymarket-breaking-list');
+  const hotTopicsEl = document.getElementById('polymarket-hot-topics');
+  const featuredEl = document.getElementById('polymarket-featured-market');
+  const spotlightEl = document.getElementById('polymarket-spotlight-strip');
 
   if (btcPriceEl) {
     if (!activeBtc || !Number.isFinite(Number(activeBtc.price))) {
@@ -1602,7 +1607,7 @@ function renderPolymarketDashboard(btcTick, markets) {
       const price = Number(activeBtc.price);
       const change24h = Number(activeBtc.change_24h ?? activeBtc.change24h);
       const cls = Number.isFinite(change24h) ? (change24h >= 0 ? 'up' : 'down') : '';
-      btcPriceEl.textContent = `$${price.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+      btcPriceEl.textContent = `${price.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
       btcPriceEl.className = `polymarket-btc__price ${cls}`.trim();
     }
   }
@@ -1624,7 +1629,7 @@ function renderPolymarketDashboard(btcTick, markets) {
 
   if (syncEl) {
     const ts = activeBtc?.provider_ts || activeBtc?.created_at || null;
-    syncEl.textContent = ts ? `Last sync: ${formatMalaysiaTime(ts)}` : 'Δ --';
+    syncEl.textContent = ts ? `Last sync: ${formatMalaysiaTime(ts)}` : 'Last sync: --';
   }
 
   if (kpiCountEl) {
@@ -1649,7 +1654,7 @@ function renderPolymarketDashboard(btcTick, markets) {
       if (activeBtc && Number.isFinite(Number(activeBtc.price))) {
         const price = Number(activeBtc.price);
         const chg = Number(activeBtc.change_24h ?? activeBtc.change24h);
-        headerPrice.textContent = `$${price.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+        headerPrice.textContent = `${price.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
         headerPrice.className = 'topbar__price';
         if (Number.isFinite(chg)) {
           headerPrice.classList.add(chg >= 0 ? 'up' : 'down');
@@ -1665,7 +1670,7 @@ function renderPolymarketDashboard(btcTick, markets) {
       if (activeBtc) {
         const chg = Number(activeBtc.change_24h ?? activeBtc.change24h);
         const ts = activeBtc.provider_ts || activeBtc.created_at;
-        const age = ts ? `Last sync: ${formatMalaysiaTime(ts, true)}` : 'Δ --';
+        const age = ts ? `Last sync: ${formatMalaysiaTime(ts, true)}` : 'Last sync: --';
         headerChange.textContent = Number.isFinite(chg)
           ? `BTC 24h: ${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% | ${age}`
           : `BTC 24h: -- | ${age}`;
@@ -1675,26 +1680,133 @@ function renderPolymarketDashboard(btcTick, markets) {
     }
   }
 
-  if (trendEl) {
-    const trending = filtered
-      .filter((m) => m.status === 'active')
-      .slice()
-      .sort((a, b) => (Number(b.volume) || -Infinity) - (Number(a.volume) || -Infinity))
-      .slice(0, 5);
-    if (trending.length === 0) {
-      trendEl.innerHTML = '<div class="feature-note">No trending markets for this tab yet.</div>';
+  const getStatusText = (market) => {
+    if (market.status.includes('resolved')) return 'RESOLVED';
+    if (market.status.includes('closed')) return 'CLOSED';
+    return 'ACTIVE';
+  };
+
+  const getCategoryLabel = (market) => {
+    const categories = Array.isArray(market.categories) ? market.categories : [];
+    const primary = categories.find((category) => category !== 'trending' && category !== 'breaking' && category !== 'new') || market.category;
+    return POLY_LABELS[primary] || String(primary || 'Other').toUpperCase();
+  };
+
+  const getEndText = (market) => {
+    if (!market.endDate) return '--';
+    if (Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0) {
+      return market.hoursUntil < 24 ? `${market.hoursUntil.toFixed(1)}h left` : `${Math.ceil(market.hoursUntil / 24)}d left`;
+    }
+    if (Number.isFinite(market.hoursUntil) && market.hoursUntil < 0) return 'Ended';
+    return formatMalaysiaTime(market.endDate, true);
+  };
+
+  if (breakingEl) {
+    if (breakingMarkets.length === 0) {
+      breakingEl.innerHTML = '<div class="feature-note">No breaking markets yet.</div>';
     } else {
-      trendEl.innerHTML = trending.map((market) => {
-        const prob = Number.isFinite(market.yesPct) ? `${market.yesPct.toFixed(1)}% YES` : '--';
-        const vol = Number.isFinite(market.volume) ? formatCompactUsd(market.volume) : '--';
-        const catLabel = POLY_LABELS[market.category] || market.category.toUpperCase();
-        return `
-          <div class="poly-trend-chip">
-            <div class="poly-trend-chip__title">${escapeHtml(market.title)}</div>
-            <div class="poly-trend-chip__meta">${escapeHtml(catLabel)} | ${escapeHtml(prob)} | Vol ${escapeHtml(vol)}</div>
+      breakingEl.innerHTML = breakingMarkets.map((market, index) => `
+        <article class="poly-side-item">
+          <span class="poly-side-item__rank">${index + 1}</span>
+          <div class="poly-side-item__body">
+            <div class="poly-side-item__title">${escapeHtml(market.title)}</div>
+            <div class="poly-side-item__meta">${escapeHtml(getCategoryLabel(market))} | ${escapeHtml(formatCompactUsd(market.volume))}</div>
           </div>
-        `;
-      }).join('');
+          <span class="poly-side-item__prob">${Number.isFinite(market.yesPct) ? `${market.yesPct.toFixed(0)}%` : '--'}</span>
+        </article>
+      `).join('');
+    }
+  }
+
+  if (hotTopicsEl) {
+    if (topicRows.length === 0) {
+      hotTopicsEl.innerHTML = '<div class="feature-note">Topics will appear here automatically.</div>';
+    } else {
+      hotTopicsEl.innerHTML = topicRows.map((topic) => `
+        <button type="button" class="poly-topic-card ${topic.category === activeCategory ? 'active' : ''}" data-poly-topic="${topic.category}">
+          <span class="poly-topic-card__label">${escapeHtml(topic.label)}</span>
+          <span class="poly-topic-card__meta">${topic.count} mkts | ${escapeHtml(formatCompactUsd(topic.volume))}</span>
+        </button>
+      `).join('');
+      hotTopicsEl.querySelectorAll('[data-poly-topic]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          setPolymarketCategory(btn.dataset.polyTopic || 'all');
+          renderPolymarketDashboard();
+        });
+      });
+    }
+  }
+
+  if (featuredEl) {
+    if (!featuredMarket) {
+      featuredEl.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-state__title">No featured market yet</div>
+          <div class="empty-state__sub">Try another category or wait for the next collector sync.</div>
+        </div>
+      `;
+    } else {
+      const yesPctText = Number.isFinite(featuredMarket.yesPct) ? `${featuredMarket.yesPct.toFixed(0)}%` : '--';
+      const noPctText = Number.isFinite(featuredMarket.noPct) ? `${featuredMarket.noPct.toFixed(0)}%` : '--';
+      const yesText = Number.isFinite(featuredMarket.yesPct) ? `${Math.round(featuredMarket.yesPct)}c` : '--';
+      const noText = Number.isFinite(featuredMarket.noPct) ? `${Math.round(featuredMarket.noPct)}c` : '--';
+      const categoryLine = (featuredMarket.categories || [])
+        .filter((category) => category !== 'all')
+        .slice(0, 3)
+        .map((category) => POLY_LABELS[category] || category)
+        .join(' • ');
+      featuredEl.innerHTML = `
+        <div class="poly-featured-card__head">
+          <div>
+            <div class="poly-featured-card__eyebrow">${escapeHtml(categoryLine || getCategoryLabel(featuredMarket))}</div>
+            <h3 class="poly-featured-card__title">${escapeHtml(featuredMarket.title)}</h3>
+          </div>
+          <span class="polymarket-card__status ${featuredMarket.status.includes('resolved') ? 'status-resolved' : featuredMarket.status.includes('closed') ? 'status-closed' : 'status-active'}">${getStatusText(featuredMarket)}</span>
+        </div>
+        <div class="poly-featured-card__body">
+          <div class="poly-featured-card__pricing">
+            <div class="poly-featured-stat">
+              <span class="poly-featured-stat__label">Volume</span>
+              <span class="poly-featured-stat__value">${formatCompactUsd(featuredMarket.volume)}</span>
+            </div>
+            <div class="poly-featured-stat">
+              <span class="poly-featured-stat__label">Liquidity</span>
+              <span class="poly-featured-stat__value">${formatCompactUsd(featuredMarket.liquidity)}</span>
+            </div>
+            <div class="poly-featured-stat">
+              <span class="poly-featured-stat__label">Ends</span>
+              <span class="poly-featured-stat__value">${escapeHtml(getEndText(featuredMarket))}</span>
+            </div>
+          </div>
+          <div class="poly-featured-odds">
+            <div class="poly-featured-odd poly-featured-odd--yes">
+              <span class="poly-featured-odd__name">Yes</span>
+              <strong>${yesPctText}</strong>
+              <span>${yesText}</span>
+            </div>
+            <div class="poly-featured-odd poly-featured-odd--no">
+              <span class="poly-featured-odd__name">No</span>
+              <strong>${noPctText}</strong>
+              <span>${noText}</span>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+  }
+
+  if (spotlightEl) {
+    if (spotlightMarkets.length === 0) {
+      spotlightEl.innerHTML = '<div class="feature-note">More spotlight markets will appear here.</div>';
+    } else {
+      spotlightEl.innerHTML = spotlightMarkets.map((market) => `
+        <article class="poly-spotlight-card">
+          <div class="poly-spotlight-card__cat">${escapeHtml(getCategoryLabel(market))}</div>
+          <div class="poly-spotlight-card__title">${escapeHtml(market.title)}</div>
+          <div class="poly-spotlight-card__meta">${escapeHtml(getStatusText(market))} | ${escapeHtml(formatCompactUsd(market.volume))}</div>
+          <div class="poly-spotlight-card__prob">${Number.isFinite(market.yesPct) ? `${market.yesPct.toFixed(0)}% YES` : '--'}</div>
+        </article>
+      `).join('');
     }
   }
 
@@ -1711,7 +1823,7 @@ function renderPolymarketDashboard(btcTick, markets) {
 
   const top = filtered.slice(0, 60);
   listEl.innerHTML = top.map((market) => {
-    const category = POLY_LABELS[market.category] || String(market.category || 'Other').toUpperCase();
+    const category = getCategoryLabel(market);
     const iconByCategory = {
       trending: 'Tr',
       breaking: 'Br',
@@ -1723,11 +1835,12 @@ function renderPolymarketDashboard(btcTick, markets) {
       geopolitics: 'Ge',
       xauusd: 'Au',
     };
-    const categoryIcon = iconByCategory[market.category] || 'Mk';
+    const leadCategory = (market.categories || []).find((category) => iconByCategory[category]) || market.category;
+    const categoryIcon = iconByCategory[leadCategory] || 'Mk';
     const typeLabelMap = {
       all: 'General',
-      up_down: 'Up/Down',
-      above_below: 'Above/Below',
+      up_down: 'Up / Down',
+      above_below: 'Above / Below',
       price_range: 'Price Range',
       hit_price: 'Hit Price',
     };
@@ -1739,20 +1852,7 @@ function renderPolymarketDashboard(btcTick, markets) {
     const probWidth = Number.isFinite(market.yesPct) ? Math.max(2, Math.min(98, market.yesPct)) : 50;
     const volText = Number.isFinite(market.volume) ? formatCompactUsd(market.volume) : '--';
     const liqText = Number.isFinite(market.liquidity) ? formatCompactUsd(market.liquidity) : '--';
-
-    let endText = '--';
-    if (market.endDate) {
-      if (Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0) {
-        endText = market.hoursUntil < 24
-          ? `${market.hoursUntil.toFixed(1)}h left`
-          : `${Math.ceil(market.hoursUntil / 24)}d left`;
-      } else if (Number.isFinite(market.hoursUntil) && market.hoursUntil < 0) {
-        endText = 'Ended';
-      } else {
-        endText = formatMalaysiaTime(market.endDate, true);
-      }
-    }
-
+    const endText = getEndText(market);
     let statusText = 'ACTIVE';
     let statusClass = 'status-active';
     if (market.status.includes('closed')) {
@@ -1801,7 +1901,6 @@ function renderPolymarketDashboard(btcTick, markets) {
     `;
   }).join('');
 }
-
 function renderStats(stats) {
   if (!stats) return;
 
@@ -2171,5 +2270,6 @@ window.UI = {
   renderDemoEquityCurve,
   updateRiskCalc,
 };
+
 
 

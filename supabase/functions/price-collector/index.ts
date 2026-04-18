@@ -19,6 +19,8 @@ const SERVICE_ROLE_KEY = Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPAB
 const PRICE_COLLECTOR_CRON_SECRET = Deno.env.get("PRICE_COLLECTOR_CRON_SECRET") ?? "";
 const SYMBOL = Deno.env.get("TWELVE_SYMBOL") ?? "XAU/USD";
 const TWELVE_BASE_URL = "https://api.twelvedata.com";
+const MARKET_REOPEN_SUNDAY_UTC_HOUR = 22;
+const MARKET_CLOSE_FRIDAY_UTC_HOUR = 22;
 
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -54,6 +56,34 @@ function clampToRecent(isoTs: string, maxAgeMinutes = 30): string {
   if (!Number.isFinite(ts)) return new Date().toISOString();
   const ageMin = Math.abs(now - ts) / 60000;
   return ageMin > maxAgeMinutes ? new Date().toISOString() : new Date(ts).toISOString();
+}
+
+function getMarketClockContext(now = new Date()) {
+  const weekday = now.getUTCDay(); // 0=Sun, 5=Fri, 6=Sat
+  const totalMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const reopenMinutes = MARKET_REOPEN_SUNDAY_UTC_HOUR * 60;
+  const fridayCloseMinutes = MARKET_CLOSE_FRIDAY_UTC_HOUR * 60;
+
+  let marketOpen = true;
+  let reason = "OPEN";
+  if (weekday === 6) {
+    marketOpen = false;
+    reason = "SATURDAY_CLOSED";
+  } else if (weekday === 0 && totalMinutes < reopenMinutes) {
+    marketOpen = false;
+    reason = "SUNDAY_PREOPEN";
+  } else if (weekday === 5 && totalMinutes >= fridayCloseMinutes) {
+    marketOpen = false;
+    reason = "FRIDAY_AFTER_CLOSE";
+  }
+
+  return {
+    marketOpen,
+    reason,
+    weekday,
+    utcHour: now.getUTCHours(),
+    utcMinute: now.getUTCMinutes(),
+  };
 }
 
 async function twelveGet(path: string, params: Record<string, string>): Promise<Record<string, unknown> | null> {
@@ -167,6 +197,21 @@ Deno.serve(async (req) => {
     if (!secret || secret !== PRICE_COLLECTOR_CRON_SECRET) {
       return jsonResponse({ error: "Unauthorized" }, 401);
     }
+  }
+
+  const marketClock = getMarketClockContext();
+  if (!marketClock.marketOpen) {
+    return jsonResponse({
+      ok: true,
+      skipped: true,
+      reason: "MARKET_CLOSED",
+      market_reason: marketClock.reason,
+      market_clock: {
+        weekday: marketClock.weekday,
+        utc_hour: marketClock.utcHour,
+        utc_minute: marketClock.utcMinute,
+      },
+    });
   }
 
   const tick = await fetchTick();

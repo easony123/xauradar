@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
@@ -239,35 +239,60 @@
         </section>
 
         <section class="page page--polymarket" id="page-polymarket">
-          <div class="poly-overview-bar">
-            <div class="poly-overview-main">
-              <div class="polymarket-btc">
-                <div class="polymarket-btc__label">Bitcoin Spot (USD)</div>
-                <div class="polymarket-btc__price" id="polymarket-btc-price">$--</div>
-                <div class="polymarket-btc__change" id="polymarket-btc-change">Waiting for feed...</div>
-                <div class="signal-hero__time" id="polymarket-last-sync">Last sync: --</div>
+          <div class="poly-home-hero">
+            <div class="poly-overview-bar">
+              <div class="poly-overview-main">
+                <div class="polymarket-btc">
+                  <div class="polymarket-btc__eyebrow">Polymarket Pulse</div>
+                  <div class="polymarket-btc__label">Bitcoin Spot (USD)</div>
+                  <div class="polymarket-btc__price" id="polymarket-btc-price">$--</div>
+                  <div class="polymarket-btc__change" id="polymarket-btc-change">Waiting for feed...</div>
+                  <div class="signal-hero__time" id="polymarket-last-sync">Last sync: --</div>
+                </div>
+                <span class="poly-live-pill">Live</span>
               </div>
-              <span class="poly-live-pill">Live</span>
+              <div class="poly-kpi-grid poly-kpi-grid--compact">
+                <div class="poly-kpi">
+                  <div class="poly-kpi__label">Markets</div>
+                  <div class="poly-kpi__value" id="polymarket-kpi-count">--</div>
+                </div>
+                <div class="poly-kpi">
+                  <div class="poly-kpi__label">Total Volume</div>
+                  <div class="poly-kpi__value" id="polymarket-kpi-volume">--</div>
+                </div>
+                <div class="poly-kpi">
+                  <div class="poly-kpi__label">Ending Soon</div>
+                  <div class="poly-kpi__value" id="polymarket-kpi-ending">--</div>
+                </div>
+              </div>
             </div>
-            <div class="poly-kpi-grid poly-kpi-grid--compact">
-              <div class="poly-kpi">
-                <div class="poly-kpi__label">Markets</div>
-                <div class="poly-kpi__value" id="polymarket-kpi-count">--</div>
-              </div>
-              <div class="poly-kpi">
-                <div class="poly-kpi__label">Total Volume</div>
-                <div class="poly-kpi__value" id="polymarket-kpi-volume">--</div>
-              </div>
-              <div class="poly-kpi">
-                <div class="poly-kpi__label">Ending Soon</div>
-                <div class="poly-kpi__value" id="polymarket-kpi-ending">--</div>
-              </div>
+
+            <div class="poly-editorial-rail">
+              <section class="poly-side-panel">
+                <div class="poly-side-panel__head">
+                  <span class="poly-side-panel__title">Breaking News</span>
+                  <span class="poly-side-panel__hint">High attention</span>
+                </div>
+                <div class="poly-side-list" id="polymarket-breaking-list">
+                  <div class="feature-note">No breaking markets yet.</div>
+                </div>
+              </section>
+
+              <section class="poly-side-panel">
+                <div class="poly-side-panel__head">
+                  <span class="poly-side-panel__title">Hot Topics</span>
+                  <span class="poly-side-panel__hint">What traders are watching</span>
+                </div>
+                <div class="poly-hot-topics" id="polymarket-hot-topics">
+                  <div class="feature-note">Topics will appear here automatically.</div>
+                </div>
+              </section>
             </div>
           </div>
 
           <div class="poly-toolbar">
             <div class="poly-search">
-              <input type="search" id="polymarket-search" placeholder="Search markets..." aria-label="Search markets">
+              <input type="search" id="polymarket-search" placeholder="Search polymarkets..." aria-label="Search markets">
             </div>
             <label class="poly-sort" for="polymarket-sort">
               <span>Sort</span>
@@ -302,6 +327,19 @@
             <button type="button" class="poly-view-tab" data-view="resolved" role="tab" aria-selected="false">Resolved</button>
           </div>
 
+          <div class="poly-stage">
+            <article class="poly-featured-card" id="polymarket-featured-market">
+              <div class="empty-state">
+                <div class="empty-state__title">Featured market loading</div>
+                <div class="empty-state__sub">Waiting for the latest market set</div>
+              </div>
+            </article>
+
+            <div class="poly-spotlight-strip" id="polymarket-spotlight-strip">
+              <div class="feature-note">More spotlight markets will appear here.</div>
+            </div>
+          </div>
+
           <div class="polymarket-market-grid" id="polymarket-markets-list">
             <div class="empty-state">
               <div class="empty-state__title">No market data yet</div>
@@ -309,7 +347,6 @@
             </div>
           </div>
         </section>
-
         <section class="page" id="page-chart">
           <div class="chart-fullscreen">
             <div class="chart-toolbar">
@@ -519,3 +556,5 @@
   <script src="js/app.js"></script>
 </body>
 </html>
+
+
