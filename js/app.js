@@ -11,9 +11,22 @@ let demoBootstrapped = false;
 let lastXauPriceData = null;
 let lastPolymarketBtc = null;
 let lastPolymarketMarkets = [];
+let lastPolymarketFeed = {
+  markets: [],
+  fallbackMarkets: [],
+  slices: { trending: [], breaking: [], new: [] },
+  liveOk: false,
+  fallbackUsed: false,
+  sourceMode: 'idle',
+  sourceLabel: 'Waiting for live feed',
+  fetchedAt: null,
+  error: '',
+};
+let lastPolymarketHistoryFetch = { slug: '', ts: 0 };
 let lastSignalHistory = [];
 let lastIndicatorSnapshot = null;
 let lastRiskState = null;
+let polymarketPollInFlight = false;
 window._lastPriceDirection = null;
 window.__currentSignal = null;
 const XAU_MARKET_REOPEN_SUNDAY_UTC_HOUR = 22;
@@ -82,6 +95,51 @@ function deriveStatsFromHistory(signals) {
   };
 }
 
+function mergePolymarketDetailIntoFeed(feed, detailRow) {
+  if (!detailRow || !detailRow.market_slug) return feed;
+  const nextFeed = {
+    ...(feed || {}),
+    markets: Array.isArray(feed?.markets) ? feed.markets.slice() : [],
+  };
+  const existingIndex = nextFeed.markets.findIndex((row) => row?.market_slug === detailRow.market_slug);
+  if (existingIndex >= 0) {
+    nextFeed.markets.splice(existingIndex, 1, {
+      ...nextFeed.markets[existingIndex],
+      ...detailRow,
+      meta: {
+        ...(nextFeed.markets[existingIndex]?.meta || {}),
+        ...(detailRow.meta || {}),
+      },
+    });
+  } else {
+    nextFeed.markets.unshift(detailRow);
+  }
+  return nextFeed;
+}
+
+async function refreshSelectedPolymarketHistory(force = false) {
+  const slug = typeof UI.getSelectedPolymarketMarketSlug === 'function'
+    ? UI.getSelectedPolymarketMarketSlug()
+    : '';
+  if (!slug || typeof UI.setPolymarketMarketHistory !== 'function') return;
+
+  const now = Date.now();
+  if (!force && lastPolymarketHistoryFetch.slug === slug && now - lastPolymarketHistoryFetch.ts < 3000) {
+    return;
+  }
+
+  try {
+    const rows = await API.fetchPolymarketMarketHistory(slug, 120);
+    UI.setPolymarketMarketHistory(slug, rows);
+    lastPolymarketHistoryFetch = { slug, ts: now };
+    if (UI.getDashboardMode() === 'polymarket') {
+      UI.renderPolymarketDashboard(lastPolymarketBtc, lastPolymarketFeed);
+    }
+  } catch (err) {
+    console.warn('Polymarket history refresh failed:', err?.message || err);
+  }
+}
+
 async function boot() {
   console.log('XAUUSD dashboard booting...');
 
@@ -96,7 +154,7 @@ async function boot() {
   window.addEventListener('xauradar:dashboard-mode', () => {
     const mode = UI.getDashboardMode();
     if (mode === 'polymarket') {
-      UI.renderPolymarketDashboard(lastPolymarketBtc, lastPolymarketMarkets);
+      UI.renderPolymarketDashboard(lastPolymarketBtc, lastPolymarketFeed);
     } else if (lastXauPriceData) {
       UI.updateHeaderPrice(lastXauPriceData);
       renderSignalDashboard();
@@ -105,6 +163,10 @@ async function boot() {
 
   window.addEventListener('xauradar:signal-lane-change', () => {
     renderSignalDashboard();
+  });
+
+  window.addEventListener('xauradar:polymarket-market-change', () => {
+    refreshSelectedPolymarketHistory(true);
   });
 
   setInterval(UI.updateSessionPill, 30000);
@@ -186,7 +248,7 @@ function startPolling() {
   setInterval(pollPrice, 30000);
   setInterval(pollSupabase, 30000);
   setInterval(pollDXY, 60000);
-  setInterval(pollPolymarket, 5000);
+  setInterval(pollPolymarket, 3000);
 }
 
 async function pollPrice(force = false) {
@@ -203,16 +265,79 @@ async function pollPrice(force = false) {
 }
 
 async function pollPolymarket() {
+  if (polymarketPollInFlight) return;
+  polymarketPollInFlight = true;
   try {
-    const [btcTick, markets] = await Promise.all([
+    const selectedSlug = typeof UI.getSelectedPolymarketMarketSlug === 'function'
+      ? UI.getSelectedPolymarketMarketSlug()
+      : '';
+    const [btcTick, liveFeed, fallbackMarkets] = await Promise.all([
       API.fetchLatestBtcTick(),
+      API.fetchPolymarketLiveMarkets(),
       API.fetchPolymarketMarkets(),
     ]);
     lastPolymarketBtc = btcTick || null;
-    lastPolymarketMarkets = Array.isArray(markets) ? markets : [];
-    UI.renderPolymarketDashboard(lastPolymarketBtc, lastPolymarketMarkets);
+    const cachedFallback = Array.isArray(fallbackMarkets) ? fallbackMarkets : [];
+
+    let nextFeed = {
+      ...lastPolymarketFeed,
+      ...(liveFeed || {}),
+      fallbackMarkets: cachedFallback,
+    };
+
+    if (liveFeed?.liveOk && Array.isArray(liveFeed.markets) && liveFeed.markets.length) {
+      nextFeed = {
+        ...nextFeed,
+        markets: liveFeed.markets,
+        liveOk: true,
+        fallbackUsed: false,
+        sourceMode: 'live',
+        sourceLabel: 'Live Gamma',
+      };
+    } else if (cachedFallback.length) {
+      nextFeed = {
+        ...nextFeed,
+        markets: cachedFallback,
+        liveOk: false,
+        fallbackUsed: true,
+        sourceMode: 'fallback',
+        sourceLabel: 'Supabase cache fallback',
+        fetchedAt: liveFeed?.fetchedAt || cachedFallback[0]?.provider_ts || new Date().toISOString(),
+      };
+    } else {
+      nextFeed = {
+        ...nextFeed,
+        liveOk: false,
+        fallbackUsed: Boolean(lastPolymarketFeed.markets?.length),
+        sourceMode: lastPolymarketFeed.markets?.length ? 'stale' : 'error',
+        sourceLabel: lastPolymarketFeed.markets?.length ? 'Holding last live values' : 'No live data',
+        error: liveFeed?.error || 'Polymarket live refresh failed',
+      };
+    }
+
+    if (selectedSlug && nextFeed.liveOk && typeof API.fetchPolymarketLiveDetail === 'function') {
+      const liveDetail = await API.fetchPolymarketLiveDetail(selectedSlug);
+      if (liveDetail) {
+        nextFeed = mergePolymarketDetailIntoFeed(nextFeed, liveDetail);
+      }
+    }
+
+    lastPolymarketFeed = nextFeed;
+    lastPolymarketMarkets = Array.isArray(nextFeed.markets) ? nextFeed.markets : [];
+    UI.renderPolymarketDashboard(lastPolymarketBtc, lastPolymarketFeed);
+    await refreshSelectedPolymarketHistory();
   } catch (err) {
     console.error('Polymarket poll error:', err.message);
+    lastPolymarketFeed = {
+      ...lastPolymarketFeed,
+      liveOk: false,
+      sourceMode: lastPolymarketFeed.markets?.length ? 'stale' : 'error',
+      sourceLabel: lastPolymarketFeed.markets?.length ? 'Holding last live values' : 'No live data',
+      error: err.message,
+    };
+    UI.renderPolymarketDashboard(lastPolymarketBtc, lastPolymarketFeed);
+  } finally {
+    polymarketPollInFlight = false;
   }
 }
 

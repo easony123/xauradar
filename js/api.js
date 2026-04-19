@@ -51,6 +51,348 @@ function toMillis(value) {
   return Number.isFinite(t) ? t : null;
 }
 
+const POLYMARKET_BASE_URL = 'https://gamma-api.polymarket.com';
+const POLYMARKET_MARKET_PAGE_SIZE = 200;
+const POLYMARKET_CATEGORY_PRIORITY = {
+  xauusd: 80,
+  oil: 75,
+  geopolitics: 70,
+  crypto: 68,
+  politics: 65,
+  finance: 60,
+  breaking: 50,
+  new: 45,
+  trending: 40,
+  other: 0,
+};
+
+function normalizeSource(raw) {
+  const src = String(raw || '').trim().toUpperCase();
+  if (['TD_LIVE', 'LIVE', 'QUOTE'].includes(src)) return 'TD_LIVE';
+  if (['TD_DELAYED', 'DELAY', '1M', 'AGG_1M'].includes(src)) return 'TD_DELAYED';
+  if (['STALE', 'PREV', 'AGG_PREV'].includes(src)) return 'STALE';
+  return src || 'STALE';
+}
+
+function tryParseJson(value) {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function parseNumber(value, fallback = 0) {
+  const n = typeof value === 'number' ? value : parseFloat(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function toXauPipsApi(priceDelta) {
+  const n = parseNumber(priceDelta, NaN);
+  if (!Number.isFinite(n)) return NaN;
+  const pipSize = Number.isFinite(API_XAU_PIP_SIZE) && API_XAU_PIP_SIZE > 0 ? API_XAU_PIP_SIZE : 0.1;
+  return n / pipSize;
+}
+
+function toMillis(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  const t = d.getTime();
+  return Number.isFinite(t) ? t : null;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function normalizeProbabilityPercent(raw, fallbackYesPrice = null) {
+  const n = parseNumber(raw, NaN);
+  if (Number.isFinite(n)) {
+    if (n >= 0 && n <= 1) return n * 100;
+    if (n >= 0 && n <= 100) return n;
+  }
+  if (Number.isFinite(fallbackYesPrice)) {
+    return clamp(fallbackYesPrice * 100, 0, 100);
+  }
+  return NaN;
+}
+
+function parseMaybeArray(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function uniqueStrings(values = []) {
+  const out = [];
+  values.forEach((value) => {
+    const text = String(value || '').trim().toLowerCase();
+    if (text && !out.includes(text)) out.push(text);
+  });
+  return out;
+}
+
+function classifyPolymarketCategory(text = '') {
+  const t = String(text || '').toLowerCase();
+  if (/\b(breaking|headline|urgent)\b/.test(t)) return 'breaking';
+  if (/\b(xauusd|xau|spot gold|gold price|bullion|precious metal)\b/.test(t)) return 'xauusd';
+  if (/\b(oil|brent|wti|crude|opec|energy)\b/.test(t)) return 'oil';
+  if (/\b(bitcoin|btc|ethereum|eth|solana|sol|crypto|token|coin|doge|memecoin|altcoin|defi|stablecoin|nft)\b/.test(t)) return 'crypto';
+  if (/\b(politics|election|president|senate|congress|minister|government|white house|parliament|trump|biden)\b/.test(t)) return 'politics';
+  if (/\b(war|ukraine|russia|israel|gaza|taiwan|geopolitic|missile|sanction|ceasefire|conflict|putin|xi jinping|iran|nato|military)\b/.test(t)) return 'geopolitics';
+  if (/\b(finance|financial|fomc|fed|powell|rate cut|rate hike|interest rate|us rates|cpi|pce|nfp|inflation|gdp|economy|tariff|yield|stocks|nasdaq|dow|s&p|bond|dollar|usd|etf)\b/.test(t)) return 'finance';
+  return 'other';
+}
+
+function looksLikeBreakingMarket(text = '') {
+  return /\b(breaking|headline|urgent|flash|developing|ceasefire|deal|meeting|summit|talks|diplomatic|sanction|attack|missile|war|conflict|tariff|fed|fomc|rate cut|rate hike|interest rate|election|vote|approval|ban|default|bankruptcy|merger|earnings)\b/.test(String(text || '').toLowerCase());
+}
+
+function derivePolymarketDisplayCategories(text = '', sourceTag = 'active', rawCategory = '') {
+  const blob = `${rawCategory} ${text}`.toLowerCase();
+  const categories = [];
+  const contentCategory = classifyPolymarketCategory(blob);
+  if (contentCategory !== 'other') categories.push(contentCategory);
+  if (looksLikeBreakingMarket(blob) && ['politics', 'geopolitics', 'finance'].includes(contentCategory)) {
+    categories.push('breaking');
+  }
+  if (sourceTag === 'recent') categories.push('new');
+  if (sourceTag === 'top') categories.push('trending');
+  if (sourceTag === 'breaking') categories.push('breaking');
+  if (sourceTag === 'active' && categories.length === 0) categories.push('trending');
+  return uniqueStrings(categories.length ? categories : ['other']);
+}
+
+function mergePolymarketMeta(existing = {}, incoming = {}) {
+  const categories = uniqueStrings([
+    ...(Array.isArray(existing.display_categories) ? existing.display_categories : []),
+    ...(Array.isArray(incoming.display_categories) ? incoming.display_categories : []),
+  ]);
+  const collectorSources = uniqueStrings([
+    ...(Array.isArray(existing.collector_sources) ? existing.collector_sources : []),
+    existing.collector_source,
+    ...(Array.isArray(incoming.collector_sources) ? incoming.collector_sources : []),
+    incoming.collector_source,
+  ]);
+  const displayCategory = categories
+    .slice()
+    .sort((a, b) => (POLYMARKET_CATEGORY_PRIORITY[b] || 0) - (POLYMARKET_CATEGORY_PRIORITY[a] || 0))[0] || 'other';
+
+  return {
+    ...existing,
+    ...incoming,
+    display_category: displayCategory,
+    display_categories: categories.length ? categories : ['other'],
+    collector_source: collectorSources[0] || incoming.collector_source || existing.collector_source || 'active',
+    collector_sources: collectorSources,
+  };
+}
+
+function mergePolymarketRows(existing, incoming) {
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+  const existingMeta = existing.meta && typeof existing.meta === 'object' ? existing.meta : {};
+  const incomingMeta = incoming.meta && typeof incoming.meta === 'object' ? incoming.meta : {};
+  const incomingPriority = POLYMARKET_CATEGORY_PRIORITY[String(incomingMeta.display_category || 'other')] || 0;
+  const existingPriority = POLYMARKET_CATEGORY_PRIORITY[String(existingMeta.display_category || 'other')] || 0;
+  const pickIncoming = incomingPriority >= existingPriority || parseNumber(incoming.volume, 0) > parseNumber(existing.volume, 0);
+  const primary = pickIncoming ? incoming : existing;
+  const secondary = pickIncoming ? existing : incoming;
+
+  return {
+    ...primary,
+    title: String(primary.title || secondary.title || '').slice(0, 240),
+    category: String(primary.category || secondary.category || 'other'),
+    probability: Number.isFinite(Number(primary.probability)) ? Number(primary.probability) : Number(secondary.probability),
+    yes_price: Number.isFinite(Number(primary.yes_price)) ? Number(primary.yes_price) : parseNumber(secondary.yes_price, NaN),
+    no_price: Number.isFinite(Number(primary.no_price)) ? Number(primary.no_price) : parseNumber(secondary.no_price, NaN),
+    volume: Number.isFinite(Number(primary.volume)) ? Number(primary.volume) : parseNumber(secondary.volume, NaN),
+    liquidity: Number.isFinite(Number(primary.liquidity)) ? Number(primary.liquidity) : parseNumber(secondary.liquidity, NaN),
+    provider_ts: primary.provider_ts || secondary.provider_ts || new Date().toISOString(),
+    meta: mergePolymarketMeta(existingMeta, incomingMeta),
+  };
+}
+
+function mergePolymarketMarketLists(...lists) {
+  const merged = new Map();
+  lists.flat().forEach((row) => {
+    const slug = String(row?.market_slug || '').trim();
+    if (!slug) return;
+    const existing = merged.get(slug);
+    merged.set(slug, existing ? mergePolymarketRows(existing, row) : row);
+  });
+  return Array.from(merged.values()).sort(
+    (a, b) => (parseNumber(b.volume, 0) + parseNumber(b.liquidity, 0)) - (parseNumber(a.volume, 0) + parseNumber(a.liquidity, 0))
+  );
+}
+
+function normalizePolymarketApiRow(row, sourceTag = 'active') {
+  if (!row || typeof row !== 'object') return null;
+  const title = String(row.question ?? row.title ?? row.name ?? '').trim();
+  if (!title) return null;
+
+  const directYes = parseNumber(row.yes_price ?? row.yesPrice, NaN);
+  const directNo = parseNumber(row.no_price ?? row.noPrice, NaN);
+  const outcomePrices = parseMaybeArray(row.outcomePrices ?? row.outcome_prices)
+    .map((value) => parseNumber(value, NaN))
+    .filter((value) => Number.isFinite(value));
+  const yesPrice = Number.isFinite(directYes) ? directYes : outcomePrices[0];
+  const noPrice = Number.isFinite(directNo) ? directNo : outcomePrices[1];
+  const probability = normalizeProbabilityPercent(row.probability, yesPrice);
+  if (!Number.isFinite(probability)) return null;
+
+  const rawTags = parseMaybeArray(row.tags);
+  const tagText = rawTags.map((tag) => {
+    if (tag && typeof tag === 'object') {
+      return `${String(tag.label ?? '')} ${String(tag.name ?? '')}`.trim();
+    }
+    return String(tag || '').trim();
+  }).join(' ');
+
+  const rawCategory = String(row.category || '').trim().toLowerCase() || 'other';
+  const context = [
+    title,
+    String(row.description ?? ''),
+    rawCategory,
+    String(row.series ?? ''),
+    String(row.topic ?? ''),
+    tagText,
+  ].join(' ');
+  const displayCategories = derivePolymarketDisplayCategories(context, sourceTag, rawCategory);
+  const displayCategory = displayCategories
+    .slice()
+    .sort((a, b) => (POLYMARKET_CATEGORY_PRIORITY[b] || 0) - (POLYMARKET_CATEGORY_PRIORITY[a] || 0))[0] || 'other';
+
+  let status = 'active';
+  if (row.closed === true || row.active === false) status = 'closed';
+  if (row.resolved === true || row.archived === true) status = 'resolved';
+
+  return {
+    market_slug: String(row.slug ?? row.market_slug ?? row.id ?? '').trim(),
+    provider_ts: row.updatedAt || row.updated_at || row.createdAt || row.created_at || new Date().toISOString(),
+    title: title.slice(0, 240),
+    category: rawCategory,
+    probability: clamp(probability, 0, 100),
+    yes_price: Number.isFinite(yesPrice) ? yesPrice : null,
+    no_price: Number.isFinite(noPrice) ? noPrice : null,
+    volume: parseNumber(row.volume ?? row.volumeNum ?? row.volumeUsd, NaN),
+    liquidity: parseNumber(row.liquidity ?? row.liquidityNum, NaN),
+    status,
+    end_date: row.endDate || row.end_date || row.resolveBy || null,
+    source: 'POLYMARKET',
+    meta: {
+      market_id: row.id ?? null,
+      outcomes: row.outcomes ?? null,
+      raw_category: rawCategory,
+      display_category: displayCategory,
+      display_categories: displayCategories,
+      collector_source: sourceTag,
+      collector_sources: [sourceTag],
+      live_source: 'gamma',
+    },
+  };
+}
+
+async function fetchPolymarketGammaJson(path, params = {}) {
+  const url = new URL(`${POLYMARKET_BASE_URL}${path}`);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      url.searchParams.set(key, String(value));
+    }
+  });
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  });
+  if (!response.ok) {
+    throw new Error(`Gamma ${path} request failed with ${response.status}`);
+  }
+  return response.json();
+}
+
+async function fetchPolymarketLiveSlice(sourceTag, params, totalLimit) {
+  const rows = [];
+  const seen = new Set();
+  let offset = 0;
+
+  while (rows.length < totalLimit) {
+    const pageLimit = Math.min(POLYMARKET_MARKET_PAGE_SIZE, totalLimit - rows.length);
+    const page = await fetchPolymarketGammaJson('/markets', {
+      ...params,
+      limit: pageLimit,
+      offset,
+    });
+    if (!Array.isArray(page) || page.length === 0) break;
+
+    let added = 0;
+    page.forEach((item) => {
+      const normalized = normalizePolymarketApiRow(item, sourceTag);
+      const slug = String(normalized?.market_slug || '').trim();
+      if (!slug || seen.has(slug)) return;
+      seen.add(slug);
+      rows.push(normalized);
+      added += 1;
+    });
+
+    if (page.length < pageLimit || added === 0) break;
+    offset += page.length;
+  }
+
+  return rows;
+}
+
+async function fetchPolymarketCommodityLiveMarkets(totalLimit = 100) {
+  const out = [];
+  let offset = 0;
+
+  while (out.length < totalLimit) {
+    const pageLimit = Math.min(POLYMARKET_MARKET_PAGE_SIZE, totalLimit - out.length);
+    const page = await fetchPolymarketGammaJson('/events', {
+      tag_slug: 'commodities',
+      closed: 'false',
+      limit: pageLimit,
+      offset,
+    });
+    if (!Array.isArray(page) || page.length === 0) break;
+
+    page.forEach((event) => {
+      const eventContext = [
+        String(event?.title ?? ''),
+        String(event?.question ?? ''),
+        String(event?.slug ?? ''),
+        String(event?.description ?? ''),
+        'commodities',
+      ].join(' ');
+      const markets = Array.isArray(event?.markets) ? event.markets : [];
+      markets.forEach((market) => {
+        const merged = {
+          ...(market || {}),
+          category: market?.category || event?.category || 'commodities',
+          description: `${String(market?.description ?? '')} ${eventContext}`.trim(),
+        };
+        const normalized = normalizePolymarketApiRow(merged, 'commodity');
+        const displayCategory = String(normalized?.meta?.display_category || '');
+        if (normalized && ['xauusd', 'oil'].includes(displayCategory)) {
+          out.push(normalized);
+        }
+      });
+    });
+
+    if (page.length < pageLimit) break;
+    offset += page.length;
+  }
+
+  return mergePolymarketMarketLists(out).slice(0, totalLimit);
+}
+
 function normalizeSignal(signal) {
   if (!signal) return null;
 
@@ -432,11 +774,138 @@ async function fetchPolymarketMarkets(limit = 1000) {
       no_price: parseNumber(row.no_price, NaN),
       volume: parseNumber(row.volume, NaN),
       liquidity: parseNumber(row.liquidity, NaN),
+      meta: tryParseJson(row.meta) || row.meta || {},
     }));
   } catch (err) {
     console.error('Polymarket markets fetch error:', err.message);
     return [];
   }
+}
+
+async function fetchPolymarketMarketHistory(marketSlug, limit = 120) {
+  if (!supabaseClient) return [];
+  const slug = String(marketSlug || '').trim();
+  if (!slug) return [];
+
+  try {
+    const { data, error } = await supabaseClient
+      .from('polymarket_market_snapshots')
+      .select('*')
+      .eq('market_slug', slug)
+      .order('provider_ts', { ascending: false })
+      .limit(limit);
+
+    if (error) throw error;
+    return (data || []).map((row) => ({
+      ...row,
+      probability: parseNumber(row.probability, NaN),
+      yes_price: parseNumber(row.yes_price, NaN),
+      no_price: parseNumber(row.no_price, NaN),
+      volume: parseNumber(row.volume, NaN),
+      liquidity: parseNumber(row.liquidity, NaN),
+      meta: tryParseJson(row.meta) || row.meta || {},
+    }));
+  } catch (err) {
+    console.error('Polymarket market history fetch error:', err.message);
+    return [];
+  }
+}
+
+async function fetchPolymarketLiveMarkets() {
+  const fetchedAt = new Date().toISOString();
+  try {
+    const [trendingRows, activeRows, recentRows, commodityRows] = await Promise.all([
+      fetchPolymarketLiveSlice('top', {
+        active: 'true',
+        closed: 'false',
+        order: 'volumeNum',
+        ascending: 'false',
+      }, 120),
+      fetchPolymarketLiveSlice('active', {
+        active: 'true',
+        closed: 'false',
+        order: 'volumeNum',
+        ascending: 'false',
+      }, 320),
+      fetchPolymarketLiveSlice('recent', {
+        active: 'true',
+        closed: 'false',
+        order: 'createdAt',
+        ascending: 'false',
+      }, 120),
+      fetchPolymarketCommodityLiveMarkets(120),
+    ]);
+
+    const activeOnly = mergePolymarketMarketLists(activeRows, commodityRows)
+      .filter((row) => String(row.status || 'active').toLowerCase() === 'active');
+    const breakingSlice = activeOnly
+      .filter((row) => {
+        const meta = row.meta && typeof row.meta === 'object' ? row.meta : {};
+        const displayCategories = Array.isArray(meta.display_categories) ? meta.display_categories : [];
+        const text = [
+          row.title,
+          row.category,
+          String(meta.raw_category || ''),
+          displayCategories.join(' '),
+        ].join(' ');
+        return displayCategories.includes('breaking') || looksLikeBreakingMarket(text);
+      })
+      .sort((a, b) => parseNumber(b.volume, 0) - parseNumber(a.volume, 0))
+      .slice(0, 40);
+
+    const merged = mergePolymarketMarketLists(trendingRows, activeRows, recentRows, commodityRows, breakingSlice);
+    return {
+      liveOk: true,
+      fallbackUsed: false,
+      sourceMode: 'live',
+      sourceLabel: 'Live Gamma',
+      fetchedAt,
+      error: '',
+      markets: merged,
+      slices: {
+        trending: trendingRows,
+        breaking: breakingSlice,
+        new: recentRows,
+      },
+    };
+  } catch (err) {
+    console.error('Polymarket live Gamma fetch error:', err.message);
+    return {
+      liveOk: false,
+      fallbackUsed: false,
+      sourceMode: 'error',
+      sourceLabel: 'Live Gamma unavailable',
+      fetchedAt,
+      error: err.message,
+      markets: [],
+      slices: {
+        trending: [],
+        breaking: [],
+        new: [],
+      },
+    };
+  }
+}
+
+async function fetchPolymarketLiveDetail(marketSlug) {
+  const slug = String(marketSlug || '').trim();
+  if (!slug) return null;
+  try {
+    const exactRows = await fetchPolymarketGammaJson('/markets', {
+      slug,
+      limit: 3,
+      offset: 0,
+    });
+    if (Array.isArray(exactRows) && exactRows.length) {
+      const normalized = exactRows
+        .map((row) => normalizePolymarketApiRow(row, 'detail'))
+        .filter(Boolean);
+      if (normalized.length) return normalized[0];
+    }
+  } catch (err) {
+    console.warn('Polymarket live detail fetch warning:', err.message);
+  }
+  return null;
 }
 
 async function fetchActiveSignal() {
@@ -974,6 +1443,9 @@ window.API = {
   fetchDXYPrice,
   fetchLatestBtcTick,
   fetchPolymarketMarkets,
+  fetchPolymarketLiveMarkets,
+  fetchPolymarketLiveDetail,
+  fetchPolymarketMarketHistory,
   fetchLatestDecisionRun,
   fetchActiveSignalsByLane,
   fetchLatestLaneHistory,

@@ -21,11 +21,23 @@ let lastXauPage = 'signal';
 const polymarketState = {
   btcTick: null,
   markets: [],
+  slices: { trending: [], breaking: [], new: [] },
+  feedStatus: {
+    liveOk: false,
+    fallbackUsed: false,
+    sourceMode: 'idle',
+    sourceLabel: 'Waiting for live feed',
+    fetchedAt: null,
+    error: '',
+  },
   category: 'all',
   query: '',
   sort: 'volume',
   view: 'all',
   betType: 'all',
+  renderCount: 60,
+  selectedMarketSlug: '',
+  historyBySlug: {},
 };
 const POLY_CATEGORIES = ['all', 'trending', 'breaking', 'new', 'politics', 'crypto', 'finance', 'geopolitics', 'oil', 'xauusd'];
 const POLY_SORT_OPTIONS = ['volume', 'liquidity', 'ending', 'probability'];
@@ -45,6 +57,7 @@ const POLY_LABELS = {
 };
 
 let googleTranslateLoader = null;
+const animatedValueState = new Map();
 
 function getSelectedSignalLane() {
   return String(localStorage.getItem(SIGNAL_LANE_KEY) || 'intraday').toLowerCase() === 'swing' ? 'swing' : 'intraday';
@@ -57,6 +70,93 @@ function setSelectedSignalLane(lane, emit = true) {
     window.dispatchEvent(new CustomEvent('xauradar:signal-lane-change', { detail: { lane: normalized } }));
   }
   return normalized;
+}
+
+function pulseAnimatedElement(el, direction = 'neutral') {
+  if (!el) return;
+  el.classList.remove('value-refresh', 'value-refresh--up', 'value-refresh--down', 'value-refresh--neutral');
+  void el.offsetWidth;
+  el.classList.add('value-refresh', `value-refresh--${direction}`);
+}
+
+function setAnimatedContent(el, key, displayValue, options = {}) {
+  if (!el) return;
+  const { html = false, numericValue = NaN } = options;
+  const normalizedDisplay = String(displayValue ?? '');
+  const nextNumeric = Number.isFinite(numericValue) ? Number(numericValue) : NaN;
+  const previous = animatedValueState.get(key);
+  const changed = !previous || previous.display !== normalizedDisplay;
+
+  if (html) {
+    el.innerHTML = normalizedDisplay;
+  } else {
+    el.textContent = normalizedDisplay;
+  }
+
+  if (changed && previous) {
+    let direction = 'neutral';
+    if (Number.isFinite(previous.numeric) && Number.isFinite(nextNumeric)) {
+      if (nextNumeric > previous.numeric) direction = 'up';
+      else if (nextNumeric < previous.numeric) direction = 'down';
+    }
+    pulseAnimatedElement(el, direction);
+  }
+
+  animatedValueState.set(key, { display: normalizedDisplay, numeric: nextNumeric });
+}
+
+function setAnimatedButtonCount(btn, key, label, count) {
+  if (!btn) return;
+  const safeCount = Number.isFinite(Number(count)) ? Number(count) : 0;
+  const text = `${String(label || '').split(' (')[0]} (${safeCount})`;
+  const previous = animatedValueState.get(key);
+  btn.textContent = text;
+  if (previous && previous.numeric !== safeCount) {
+    const direction = safeCount > previous.numeric ? 'up' : safeCount < previous.numeric ? 'down' : 'neutral';
+    pulseAnimatedElement(btn, direction);
+  }
+  animatedValueState.set(key, { display: text, numeric: safeCount });
+}
+
+function buildAnimatedInlineMarkup(key, displayValue, numericValue, tagName = 'span', className = '', inlineStyle = '') {
+  const safeTag = String(tagName || 'span').toLowerCase();
+  const attrs = [
+    className ? `class="${escapeHtml(className)}"` : '',
+    `data-animate-key="${escapeHtml(key)}"`,
+    `data-animate-value="${escapeHtml(String(numericValue))}"`,
+    inlineStyle ? `style="${escapeHtml(inlineStyle)}"` : '',
+  ].filter(Boolean).join(' ');
+  return `<${safeTag} ${attrs}>${escapeHtml(String(displayValue))}</${safeTag}>`;
+}
+
+function applyAnimatedValues(root) {
+  if (!root) return;
+  root.querySelectorAll('[data-animate-key]').forEach((el) => {
+    const key = String(el.getAttribute('data-animate-key') || '').trim();
+    if (!key) return;
+    const numericValue = Number(el.getAttribute('data-animate-value'));
+    const displayValue = el.textContent || '';
+    setAnimatedContent(el, key, displayValue, { numericValue });
+  });
+}
+
+function getSelectedPolymarketMarketSlug() {
+  return String(polymarketState.selectedMarketSlug || '').trim();
+}
+
+function setSelectedPolymarketMarketSlug(slug, emit = true) {
+  const normalized = String(slug || '').trim();
+  polymarketState.selectedMarketSlug = normalized;
+  if (emit && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('xauradar:polymarket-market-change', { detail: { slug: normalized || null } }));
+  }
+  return normalized;
+}
+
+function setPolymarketMarketHistory(slug, rows = []) {
+  const key = String(slug || '').trim();
+  if (!key) return;
+  polymarketState.historyBySlug[key] = Array.isArray(rows) ? rows.slice() : [];
 }
 
 function toXauPips(priceDelta) {
@@ -192,6 +292,12 @@ function getHoursUntil(value) {
   const ts = new Date(value).getTime();
   if (!Number.isFinite(ts)) return null;
   return (ts - Date.now()) / 3600000;
+}
+
+function toMillisUi(value) {
+  if (!value) return null;
+  const ts = new Date(value).getTime();
+  return Number.isFinite(ts) ? ts : null;
 }
 
 function updateDashboardTopbar(mode) {
@@ -426,6 +532,8 @@ function initPolymarketControls() {
   const viewTabs = Array.from(document.querySelectorAll('#polymarket-view-nav .poly-view-tab'));
   const searchInput = document.getElementById('polymarket-search');
   const sortSelect = document.getElementById('polymarket-sort');
+  const detailClose = document.getElementById('polymarket-detail-close');
+  const detailBackdrop = document.getElementById('polymarket-detail-backdrop');
 
   const savedCategory = localStorage.getItem(POLY_CATEGORY_KEY);
   const savedSort = localStorage.getItem(POLY_SORT_KEY);
@@ -483,6 +591,32 @@ function initPolymarketControls() {
     sortSelect.dataset.bound = '1';
     sortSelect.addEventListener('change', () => {
       setPolymarketSort(sortSelect.value);
+      renderPolymarketDashboard();
+    });
+  }
+
+  if (detailClose && !detailClose.dataset.bound) {
+    detailClose.dataset.bound = '1';
+    detailClose.addEventListener('click', () => {
+      setSelectedPolymarketMarketSlug('', false);
+      renderPolymarketDashboard();
+    });
+  }
+
+  if (detailBackdrop && !detailBackdrop.dataset.bound) {
+    detailBackdrop.dataset.bound = '1';
+    detailBackdrop.addEventListener('click', () => {
+      setSelectedPolymarketMarketSlug('', false);
+      renderPolymarketDashboard();
+    });
+  }
+
+  if (!window.__polyDetailEscBound) {
+    window.__polyDetailEscBound = true;
+    window.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      if (!getSelectedPolymarketMarketSlug()) return;
+      setSelectedPolymarketMarketSlug('', false);
       renderPolymarketDashboard();
     });
   }
@@ -1467,85 +1601,137 @@ function renderEvents(events) {
   }).join('');
 }
 
-function renderPolymarketDashboard(btcTick, markets) {
+function getPolymarketStatusText(market) {
+  if (String(market?.status || '').includes('resolved')) return 'RESOLVED';
+  if (String(market?.status || '').includes('closed')) return 'CLOSED';
+  return 'ACTIVE';
+}
+
+function getPolymarketStatusClass(market) {
+  if (String(market?.status || '').includes('resolved')) return 'status-resolved';
+  if (String(market?.status || '').includes('closed')) return 'status-closed';
+  return 'status-active';
+}
+
+function getPolymarketCategoryLabel(market) {
+  const categories = Array.isArray(market?.categories) ? market.categories : [];
+  const primary = categories.find((category) => !['all', 'trending', 'breaking', 'new'].includes(category))
+    || market?.category
+    || 'other';
+  return POLY_LABELS[primary] || String(primary || 'Other').toUpperCase();
+}
+
+function getPolymarketEndText(market) {
+  if (!market?.endDate) return '--';
+  if (Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0) {
+    return market.hoursUntil < 24 ? `${market.hoursUntil.toFixed(1)}h left` : `${Math.ceil(market.hoursUntil / 24)}d left`;
+  }
+  if (Number.isFinite(market.hoursUntil) && market.hoursUntil < 0) return 'Ended';
+  return formatMalaysiaTime(market.endDate, true);
+}
+
+function buildPolymarketHistoryChartMarkup(historyRows = [], market = null) {
+  const rows = Array.isArray(historyRows) ? historyRows : [];
+  const points = rows.map((row) => {
+    const yes = clamp01To100(normalizePercent(row?.yes_price ?? row?.probability));
+    const ts = toMillisUi(row?.provider_ts || row?.created_at || row?.updated_at || row?.captured_at);
+    return Number.isFinite(yes) && Number.isFinite(ts) ? { yes, ts } : null;
+  }).filter(Boolean).sort((a, b) => a.ts - b.ts);
+
+  if (!points.length && market && Number.isFinite(market.yesPct)) {
+    points.push({ yes: market.yesPct, ts: toMillisUi(market.provider_ts) || Date.now() });
+  }
+
+  if (points.length < 2) {
+    const single = points[0];
+    return `
+      <div class="poly-detail-history__empty">
+        <div class="feature-note">${single ? `Latest probability snapshot: ${single.yes.toFixed(1)}% YES.` : 'Probability history will appear once snapshots are available.'}</div>
+      </div>
+    `;
+  }
+
+  const width = 760;
+  const height = 220;
+  const padX = 10;
+  const padY = 14;
+  const minTs = points[0].ts;
+  const maxTs = points[points.length - 1].ts;
+  const spanTs = Math.max(1, maxTs - minTs);
+  const polyline = points.map((point) => {
+    const x = padX + ((point.ts - minTs) / spanTs) * (width - padX * 2);
+    const y = padY + ((100 - point.yes) / 100) * (height - padY * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const latest = points[points.length - 1];
+  const earliest = points[0];
+  const high = points.reduce((max, point) => Math.max(max, point.yes), -Infinity);
+  const low = points.reduce((min, point) => Math.min(min, point.yes), Infinity);
+  const delta = latest.yes - earliest.yes;
+  const deltaLabel = `${delta >= 0 ? '+' : ''}${delta.toFixed(1)} pts`;
+
+  return `
+    <div class="poly-detail-history">
+      <div class="poly-detail-history__stats">
+        <span>Latest ${latest.yes.toFixed(1)}%</span>
+        <span>High ${high.toFixed(1)}%</span>
+        <span>Low ${low.toFixed(1)}%</span>
+        <span>${deltaLabel}</span>
+      </div>
+      <svg viewBox="0 0 ${width} ${height}" class="poly-detail-history__chart" role="img" aria-label="Probability history chart">
+        <defs>
+          <linearGradient id="poly-history-line" x1="0%" x2="100%" y1="0%" y2="0%">
+            <stop offset="0%" stop-color="#39c17f"></stop>
+            <stop offset="100%" stop-color="#2d8cff"></stop>
+          </linearGradient>
+        </defs>
+        <line x1="${padX}" y1="${height / 2}" x2="${width - padX}" y2="${height / 2}" class="poly-detail-history__midline"></line>
+        <polyline points="${polyline}" class="poly-detail-history__line"></polyline>
+      </svg>
+      <div class="poly-detail-history__axis">
+        <span>${escapeHtml(formatMalaysiaTime(minTs, true))}</span>
+        <span>${escapeHtml(formatMalaysiaTime(maxTs, true))}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderPolymarketDashboard(btcTick, feedOrMarkets) {
   if (btcTick !== undefined) {
     polymarketState.btcTick = btcTick || null;
   }
-  if (markets !== undefined) {
-    polymarketState.markets = Array.isArray(markets)
-      ? markets.map(normalizePolymarketRow).filter(Boolean)
-      : [];
+  if (feedOrMarkets !== undefined) {
+    if (Array.isArray(feedOrMarkets)) {
+      polymarketState.markets = feedOrMarkets.map(normalizePolymarketRow).filter(Boolean);
+      polymarketState.slices = { trending: [], breaking: [], new: [] };
+      polymarketState.feedStatus = {
+        ...polymarketState.feedStatus,
+        sourceMode: 'fallback',
+        sourceLabel: 'Supabase cache',
+      };
+    } else if (feedOrMarkets && typeof feedOrMarkets === 'object') {
+      const feed = feedOrMarkets;
+      polymarketState.markets = Array.isArray(feed.markets) ? feed.markets.map(normalizePolymarketRow).filter(Boolean) : [];
+      polymarketState.slices = {
+        trending: Array.isArray(feed.slices?.trending) ? feed.slices.trending.map(normalizePolymarketRow).filter(Boolean) : [],
+        breaking: Array.isArray(feed.slices?.breaking) ? feed.slices.breaking.map(normalizePolymarketRow).filter(Boolean) : [],
+        new: Array.isArray(feed.slices?.new) ? feed.slices.new.map(normalizePolymarketRow).filter(Boolean) : [],
+      };
+      polymarketState.feedStatus = {
+        liveOk: Boolean(feed.liveOk),
+        fallbackUsed: Boolean(feed.fallbackUsed),
+        sourceMode: String(feed.sourceMode || 'idle'),
+        sourceLabel: String(feed.sourceLabel || 'Waiting for live feed'),
+        fetchedAt: feed.fetchedAt || null,
+        error: String(feed.error || ''),
+      };
+    }
   }
 
   const activeBtc = polymarketState.btcTick;
   const rawMarkets = Array.isArray(polymarketState.markets) ? polymarketState.markets : [];
   const allMarkets = rawMarkets.filter((row) => Array.isArray(row.categories) && row.categories.some((cat) => POLY_CATEGORIES.includes(cat) && cat !== 'all'));
   const unmatchedCount = Math.max(0, rawMarkets.length - allMarkets.length);
-  const activeCategory = polymarketState.category;
-  const activeSort = polymarketState.sort;
-  const activeQuery = polymarketState.query;
-  const activeView = polymarketState.view;
-
-  const tabButtons = Array.from(document.querySelectorAll('#polymarket-tabs .poly-tab'));
-  const viewButtons = Array.from(document.querySelectorAll('#polymarket-view-nav .poly-view-tab'));
-  const categoryCounts = { all: allMarkets.length };
-  allMarkets.forEach((m) => {
-    const rowCategories = Array.isArray(m.categories) ? m.categories : [];
-    rowCategories.forEach((cat) => {
-      if (POLY_CATEGORIES.includes(cat) && cat !== 'all') {
-        categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
-      }
-    });
-  });
-
-  tabButtons.forEach((btn) => {
-    const category = String(btn.dataset.category || 'all').toLowerCase();
-    const isActive = category === activeCategory;
-    const baseLabel = btn.dataset.baseLabel || btn.textContent.trim();
-    btn.dataset.baseLabel = baseLabel;
-    const count = Number(categoryCounts[category] || 0);
-    btn.textContent = `${baseLabel.split(' (')[0]} (${count})`;
-    btn.classList.toggle('active', isActive);
-    btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
-  });
-
-  let baseFiltered = allMarkets.slice();
-  if (activeCategory !== 'all') {
-    baseFiltered = baseFiltered.filter((m) => Array.isArray(m.categories) && m.categories.includes(activeCategory));
-  }
-  if (activeQuery) {
-    baseFiltered = baseFiltered.filter((m) => {
-      const haystack = `${m.title} ${m.category} ${m.status} ${m.marketType}`.toLowerCase();
-      return haystack.includes(activeQuery);
-    });
-  }
-
-  const viewCounts = {
-    all: baseFiltered.length,
-    active: baseFiltered.filter((m) => m.status === 'active').length,
-    ending: baseFiltered.filter((m) => m.status === 'active' && Number.isFinite(m.hoursUntil) && m.hoursUntil >= 0 && m.hoursUntil <= 72).length,
-    resolved: baseFiltered.filter((m) => m.status.includes('resolved') || m.status.includes('closed')).length,
-  };
-  viewButtons.forEach((btn) => {
-    const view = String(btn.dataset.view || 'all').toLowerCase();
-    const isActive = view === activeView;
-    const baseLabel = btn.dataset.baseLabel || btn.textContent.trim();
-    btn.dataset.baseLabel = baseLabel;
-    const count = Number(viewCounts[view] || 0);
-    btn.textContent = `${baseLabel.split(' (')[0]} (${count})`;
-    btn.classList.toggle('active', isActive);
-    btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
-  });
-
-  let filtered = baseFiltered.slice();
-  if (activeView === 'active') {
-    filtered = filtered.filter((m) => m.status === 'active');
-  } else if (activeView === 'ending') {
-    filtered = filtered.filter((m) => m.status === 'active' && Number.isFinite(m.hoursUntil) && m.hoursUntil >= 0 && m.hoursUntil <= 72);
-  } else if (activeView === 'resolved') {
-    filtered = filtered.filter((m) => m.status.includes('resolved') || m.status.includes('closed'));
-  }
-
   const sorters = {
     volume: (a, b) => (Number(b.volume) || -Infinity) - (Number(a.volume) || -Infinity),
     liquidity: (a, b) => (Number(b.liquidity) || -Infinity) - (Number(a.liquidity) || -Infinity),
@@ -1559,20 +1745,111 @@ function renderPolymarketDashboard(btcTick, markets) {
       const bv = Number.isFinite(b.yesPct) ? Math.max(b.yesPct, 100 - b.yesPct) : -Infinity;
       return bv - av;
     },
+    recent: (a, b) => (toMillisUi(b.provider_ts) || 0) - (toMillisUi(a.provider_ts) || 0),
   };
+  const activeMarkets = allMarkets.filter((market) => market.status === 'active').slice().sort(sorters.volume);
+  const breakingFallback = activeMarkets.filter((market) => {
+    const text = `${market.title} ${(market.categories || []).join(' ')} ${market.rawCategory || ''}`.toLowerCase();
+    return (market.categories || []).includes('breaking') || /(breaking|urgent|headline|flash|developing|war|ceasefire|meeting|tariff|fed|rate cut|diplomatic|summit)/.test(text);
+  }).slice(0, 8);
+  const newFallback = activeMarkets.slice().sort(sorters.recent).slice(0, 12);
+  const trendingSlice = (polymarketState.slices.trending.length ? polymarketState.slices.trending : activeMarkets.slice(0, 24)).slice().sort(sorters.volume);
+  const breakingSlice = (polymarketState.slices.breaking.length ? polymarketState.slices.breaking : breakingFallback).slice().sort(sorters.volume);
+  const newSlice = (polymarketState.slices.new.length ? polymarketState.slices.new : newFallback).slice().sort(sorters.recent);
+  const selectedSlug = getSelectedPolymarketMarketSlug();
+
+  const activeCategory = polymarketState.category;
+  const activeSort = polymarketState.sort;
+  const activeQuery = polymarketState.query;
+  const activeView = polymarketState.view;
+
+  const tabButtons = Array.from(document.querySelectorAll('#polymarket-tabs .poly-tab'));
+  const viewButtons = Array.from(document.querySelectorAll('#polymarket-view-nav .poly-view-tab'));
+  const categoryCounts = {
+    all: allMarkets.length,
+    trending: trendingSlice.length,
+    breaking: breakingSlice.length,
+    new: newSlice.length,
+  };
+  allMarkets.forEach((market) => {
+    const categories = Array.isArray(market.categories) ? market.categories : [];
+    categories.forEach((category) => {
+      if (POLY_CATEGORIES.includes(category) && !['all', 'trending', 'breaking', 'new'].includes(category)) {
+        categoryCounts[category] = (categoryCounts[category] || 0) + 1;
+      }
+    });
+  });
+  tabButtons.forEach((btn) => {
+    const category = String(btn.dataset.category || 'all').toLowerCase();
+    const isActive = category === activeCategory;
+    const baseLabel = btn.dataset.baseLabel || btn.textContent.trim();
+    btn.dataset.baseLabel = baseLabel;
+    setAnimatedButtonCount(btn, `poly-tab:${category}`, baseLabel, Number(categoryCounts[category] || 0));
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
+  let baseFiltered;
+  if (activeCategory === 'trending') baseFiltered = trendingSlice.slice();
+  else if (activeCategory === 'breaking') baseFiltered = breakingSlice.slice();
+  else if (activeCategory === 'new') baseFiltered = newSlice.slice();
+  else if (activeCategory === 'all') baseFiltered = allMarkets.slice();
+  else baseFiltered = allMarkets.filter((market) => Array.isArray(market.categories) && market.categories.includes(activeCategory));
+  if (activeQuery) {
+    baseFiltered = baseFiltered.filter((market) => {
+      const haystack = `${market.title} ${market.category} ${(market.categories || []).join(' ')} ${market.status} ${market.marketType}`.toLowerCase();
+      return haystack.includes(activeQuery);
+    });
+  }
+
+  const viewCounts = {
+    all: baseFiltered.length,
+    active: baseFiltered.filter((market) => market.status === 'active').length,
+    ending: baseFiltered.filter((market) => market.status === 'active' && Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0 && market.hoursUntil <= 72).length,
+    resolved: baseFiltered.filter((market) => market.status.includes('resolved') || market.status.includes('closed')).length,
+  };
+  viewButtons.forEach((btn) => {
+    const view = String(btn.dataset.view || 'all').toLowerCase();
+    const isActive = view === activeView;
+    const baseLabel = btn.dataset.baseLabel || btn.textContent.trim();
+    btn.dataset.baseLabel = baseLabel;
+    setAnimatedButtonCount(btn, `poly-view:${view}`, baseLabel, Number(viewCounts[view] || 0));
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
+
+  let filtered = baseFiltered.slice();
+  if (activeView === 'active') {
+    filtered = filtered.filter((market) => market.status === 'active');
+  } else if (activeView === 'ending') {
+    filtered = filtered.filter((market) => market.status === 'active' && Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0 && market.hoursUntil <= 72);
+  } else if (activeView === 'resolved') {
+    filtered = filtered.filter((market) => market.status.includes('resolved') || market.status.includes('closed'));
+  }
   filtered.sort(sorters[activeSort] || sorters.volume);
 
-  const activeMarkets = allMarkets.filter((m) => m.status === 'active').slice().sort(sorters.volume);
-  const breakingMarkets = activeMarkets.filter((market) => {
-    const text = `${market.title} ${(market.categories || []).join(' ')} ${market.rawCategory || ''}`.toLowerCase();
-    return (market.categories || []).includes('breaking') || /(breaking|urgent|headline|flash|developing|war|ceasefire|meeting|tariff|fed|rate cut|diplomatic)/.test(text);
-  }).slice(0, 5);
-
-  const featuredMarket = filtered.find((market) => market.status === 'active') || filtered[0] || activeMarkets[0] || allMarkets[0] || null;
-  const spotlightMarkets = filtered.filter((market) => !featuredMarket || market.title !== featuredMarket.title).slice(0, 4);
-
+  const featuredMarket = filtered.find((market) => market.status === 'active')
+    || trendingSlice.find((market) => market.status === 'active')
+    || filtered[0]
+    || activeMarkets[0]
+    || allMarkets[0]
+    || null;
+  const spotlightSource = activeCategory === 'breaking'
+    ? breakingSlice
+    : activeCategory === 'new'
+      ? newSlice
+      : trendingSlice.length
+        ? trendingSlice
+        : filtered;
+  const spotlightMarkets = spotlightSource.filter((market) => !featuredMarket || market.market_slug !== featuredMarket.market_slug).slice(0, 4);
+  const selectedMarket = selectedSlug
+    ? (allMarkets.find((market) => market.market_slug === selectedSlug)
+      || trendingSlice.find((market) => market.market_slug === selectedSlug)
+      || breakingSlice.find((market) => market.market_slug === selectedSlug)
+      || newSlice.find((market) => market.market_slug === selectedSlug)
+      || null)
+    : null;
   const topicRows = POLY_CATEGORIES
-    .filter((category) => category !== 'all')
+    .filter((category) => !['all', 'trending', 'breaking', 'new'].includes(category))
     .map((category) => {
       const rows = activeMarkets.filter((market) => Array.isArray(market.categories) && market.categories.includes(category));
       return {
@@ -1589,6 +1866,7 @@ function renderPolymarketDashboard(btcTick, markets) {
   const btcPriceEl = document.getElementById('polymarket-btc-price');
   const btcChangeEl = document.getElementById('polymarket-btc-change');
   const syncEl = document.getElementById('polymarket-last-sync');
+  const livePillEl = document.getElementById('polymarket-live-pill');
   const kpiCountEl = document.getElementById('polymarket-kpi-count');
   const kpiVolEl = document.getElementById('polymarket-kpi-volume');
   const kpiEndingEl = document.getElementById('polymarket-kpi-ending');
@@ -1598,53 +1876,65 @@ function renderPolymarketDashboard(btcTick, markets) {
   const hotTopicsEl = document.getElementById('polymarket-hot-topics');
   const featuredEl = document.getElementById('polymarket-featured-market');
   const spotlightEl = document.getElementById('polymarket-spotlight-strip');
+  const detailBackdrop = document.getElementById('polymarket-detail-backdrop');
+  const detailSheet = document.getElementById('polymarket-detail-sheet');
+  const detailTitleEl = document.getElementById('polymarket-detail-title');
+  const detailBodyEl = document.getElementById('polymarket-detail-body');
 
   if (btcPriceEl) {
     if (!activeBtc || !Number.isFinite(Number(activeBtc.price))) {
-      btcPriceEl.textContent = '$--';
+      setAnimatedContent(btcPriceEl, 'poly:btc:price', '$--');
       btcPriceEl.className = 'polymarket-btc__price';
     } else {
       const price = Number(activeBtc.price);
       const change24h = Number(activeBtc.change_24h ?? activeBtc.change24h);
-      const cls = Number.isFinite(change24h) ? (change24h >= 0 ? 'up' : 'down') : '';
-      btcPriceEl.textContent = `${price.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
-      btcPriceEl.className = `polymarket-btc__price ${cls}`.trim();
+      btcPriceEl.className = `polymarket-btc__price ${Number.isFinite(change24h) ? (change24h >= 0 ? 'up' : 'down') : ''}`.trim();
+      setAnimatedContent(btcPriceEl, 'poly:btc:price', `$${price.toLocaleString('en-US', { maximumFractionDigits: 2 })}`, { numericValue: price });
     }
   }
-
   if (btcChangeEl) {
     if (!activeBtc) {
-      btcChangeEl.textContent = 'Waiting for feed...';
+      setAnimatedContent(btcChangeEl, 'poly:btc:change', 'Waiting for feed...');
     } else {
       const change24h = Number(activeBtc.change_24h ?? activeBtc.change24h);
       if (Number.isFinite(change24h)) {
         const sign = change24h >= 0 ? '+' : '-';
         const icon = change24h >= 0 ? '\u25B2' : '\u25BC';
-        btcChangeEl.textContent = `${icon} ${sign}${Math.abs(change24h).toFixed(2)}% (24h)`;
+        setAnimatedContent(btcChangeEl, 'poly:btc:change', `${icon} ${sign}${Math.abs(change24h).toFixed(2)}% (24h)`, { numericValue: change24h });
       } else {
-        btcChangeEl.textContent = '24h change unavailable';
+        setAnimatedContent(btcChangeEl, 'poly:btc:change', '24h change unavailable');
       }
     }
   }
-
   if (syncEl) {
-    const ts = activeBtc?.provider_ts || activeBtc?.created_at || null;
-    syncEl.textContent = ts ? `Last sync: ${formatMalaysiaTime(ts)}` : 'Last sync: --';
+    const ts = polymarketState.feedStatus.fetchedAt || activeBtc?.provider_ts || activeBtc?.created_at || null;
+    syncEl.textContent = ts ? `Last sync: ${formatMalaysiaTime(ts, true)}` : 'Last sync: --';
+  }
+  if (livePillEl) {
+    livePillEl.textContent = polymarketState.feedStatus.sourceLabel || 'Live Gamma';
+    livePillEl.classList.remove('poly-live-pill--fallback', 'poly-live-pill--stale');
+    if (polymarketState.feedStatus.sourceMode === 'fallback') {
+      livePillEl.classList.add('poly-live-pill--fallback');
+    } else if (['stale', 'error'].includes(polymarketState.feedStatus.sourceMode)) {
+      livePillEl.classList.add('poly-live-pill--stale');
+    }
   }
 
-  if (kpiCountEl) {
-    kpiCountEl.textContent = String(filtered.length);
-  }
-  if (kpiVolEl) {
-    const totalVol = filtered.reduce((sum, m) => sum + (Number.isFinite(m.volume) ? m.volume : 0), 0);
-    kpiVolEl.textContent = formatCompactUsd(totalVol);
-  }
-  if (kpiEndingEl) {
-    const endingSoon = filtered.filter((m) => Number.isFinite(m.hoursUntil) && m.hoursUntil >= 0 && m.hoursUntil <= 48).length;
-    kpiEndingEl.textContent = String(endingSoon);
-  }
+  setAnimatedContent(kpiCountEl, 'poly:kpi:count', String(filtered.length), { numericValue: filtered.length });
+  setAnimatedContent(
+    kpiVolEl,
+    'poly:kpi:volume',
+    formatCompactUsd(filtered.reduce((sum, market) => sum + (Number.isFinite(market.volume) ? market.volume : 0), 0)),
+    { numericValue: filtered.reduce((sum, market) => sum + (Number.isFinite(market.volume) ? market.volume : 0), 0) }
+  );
+  setAnimatedContent(
+    kpiEndingEl,
+    'poly:kpi:ending',
+    String(filtered.filter((market) => Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0 && market.hoursUntil <= 48).length),
+    { numericValue: filtered.filter((market) => Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0 && market.hoursUntil <= 48).length }
+  );
   if (diagnosticsEl) {
-    diagnosticsEl.textContent = `Loaded ${allMarkets.length} mapped markets | ${unmatchedCount} unmatched`;
+    diagnosticsEl.textContent = `${buildPolymarketFreshnessSummary(polymarketState.feedStatus)} | Loaded ${allMarkets.length} mapped markets | ${unmatchedCount} unmatched`;
   }
 
   if (getDashboardMode() === 'polymarket') {
@@ -1654,72 +1944,86 @@ function renderPolymarketDashboard(btcTick, markets) {
       if (activeBtc && Number.isFinite(Number(activeBtc.price))) {
         const price = Number(activeBtc.price);
         const chg = Number(activeBtc.change_24h ?? activeBtc.change24h);
-        headerPrice.textContent = `${price.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
-        headerPrice.className = 'topbar__price';
-        if (Number.isFinite(chg)) {
-          headerPrice.classList.add(chg >= 0 ? 'up' : 'down');
-        } else {
-          headerPrice.classList.add('neutral');
-        }
+        headerPrice.className = `topbar__price ${Number.isFinite(chg) ? (chg >= 0 ? 'up' : 'down') : 'neutral'}`;
+        setAnimatedContent(headerPrice, 'poly:topbar:price', `$${price.toLocaleString('en-US', { maximumFractionDigits: 2 })}`, { numericValue: price });
       } else {
-        headerPrice.textContent = '$--';
         headerPrice.className = 'topbar__price neutral';
+        setAnimatedContent(headerPrice, 'poly:topbar:price', '$--');
       }
     }
     if (headerChange) {
       if (activeBtc) {
         const chg = Number(activeBtc.change_24h ?? activeBtc.change24h);
-        const ts = activeBtc.provider_ts || activeBtc.created_at;
-        const age = ts ? `Last sync: ${formatMalaysiaTime(ts, true)}` : 'Last sync: --';
-        headerChange.textContent = Number.isFinite(chg)
-          ? `BTC 24h: ${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% | ${age}`
-          : `BTC 24h: -- | ${age}`;
+        const ts = polymarketState.feedStatus.fetchedAt || activeBtc.provider_ts || activeBtc.created_at;
+        const age = ts ? `Updated ${formatMalaysiaTime(ts, true)}` : 'Updated --';
+        setAnimatedContent(
+          headerChange,
+          'poly:topbar:change',
+          Number.isFinite(chg) ? `BTC 24h: ${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% | ${age}` : `BTC 24h: -- | ${age}`,
+          { numericValue: chg }
+        );
       } else {
-        headerChange.textContent = 'Waiting for BTC feed';
+        setAnimatedContent(headerChange, 'poly:topbar:change', 'Waiting for BTC feed');
       }
     }
   }
 
-  const getStatusText = (market) => {
-    if (market.status.includes('resolved')) return 'RESOLVED';
-    if (market.status.includes('closed')) return 'CLOSED';
-    return 'ACTIVE';
+  const iconByCategory = {
+    trending: 'Tr',
+    breaking: 'Br',
+    new: 'Nw',
+    politics: 'Po',
+    crypto: '₿',
+    finance: 'Fi',
+    oil: 'Oi',
+    geopolitics: 'Ge',
+    xauusd: 'Au',
   };
-
-  const getCategoryLabel = (market) => {
-    const categories = Array.isArray(market.categories) ? market.categories : [];
-    const primary = categories.find((category) => category !== 'trending' && category !== 'breaking' && category !== 'new') || market.category;
-    return POLY_LABELS[primary] || String(primary || 'Other').toUpperCase();
+  const typeLabelMap = {
+    all: 'General',
+    up_down: 'Up / Down',
+    above_below: 'Above / Below',
+    price_range: 'Price Range',
+    hit_price: 'Hit Price',
   };
-
-  const getEndText = (market) => {
-    if (!market.endDate) return '--';
-    if (Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0) {
-      return market.hoursUntil < 24 ? `${market.hoursUntil.toFixed(1)}h left` : `${Math.ceil(market.hoursUntil / 24)}d left`;
-    }
-    if (Number.isFinite(market.hoursUntil) && market.hoursUntil < 0) return 'Ended';
-    return formatMalaysiaTime(market.endDate, true);
+  const buildMarketTriggerAttr = (market) => `data-poly-open-market="${escapeHtml(market.market_slug)}"`;
+  const buildProbabilityCells = (market, keyPrefix, size = 'default') => {
+    const yesPctText = Number.isFinite(market.yesPct) ? `${market.yesPct.toFixed(size === 'featured' ? 0 : 1)}%` : '--';
+    const noPctText = Number.isFinite(market.noPct) ? `${market.noPct.toFixed(size === 'featured' ? 0 : 1)}%` : '--';
+    const yesText = Number.isFinite(market.yesPct) ? `${Math.round(market.yesPct)}c` : '--';
+    const noText = Number.isFinite(market.noPct) ? `${Math.round(market.noPct)}c` : '--';
+    return {
+      yesPctText,
+      noPctText,
+      yesText,
+      noText,
+      yesPctMarkup: buildAnimatedInlineMarkup(`${keyPrefix}:yes-pct`, yesPctText, market.yesPct, 'span', size === 'featured' ? 'poly-featured-odd__pct' : 'poly-odd__pct'),
+      noPctMarkup: buildAnimatedInlineMarkup(`${keyPrefix}:no-pct`, noPctText, market.noPct, 'span', size === 'featured' ? 'poly-featured-odd__pct' : 'poly-odd__pct'),
+      yesValueMarkup: buildAnimatedInlineMarkup(`${keyPrefix}:yes-value`, yesText, market.yesPct, 'span', size === 'featured' ? 'poly-featured-odd__value' : 'poly-odd__value'),
+      noValueMarkup: buildAnimatedInlineMarkup(`${keyPrefix}:no-value`, noText, market.noPct, 'span', size === 'featured' ? 'poly-featured-odd__value' : 'poly-odd__value'),
+    };
   };
 
   if (breakingEl) {
-    if (breakingMarkets.length === 0) {
+    if (!breakingSlice.length) {
       breakingEl.innerHTML = '<div class="feature-note">No breaking markets yet.</div>';
     } else {
-      breakingEl.innerHTML = breakingMarkets.map((market, index) => `
-        <article class="poly-side-item">
+      breakingEl.innerHTML = breakingSlice.slice(0, 6).map((market, index) => `
+        <article class="poly-side-item poly-market-trigger" ${buildMarketTriggerAttr(market)}>
           <span class="poly-side-item__rank">${index + 1}</span>
           <div class="poly-side-item__body">
             <div class="poly-side-item__title">${escapeHtml(market.title)}</div>
-            <div class="poly-side-item__meta">${escapeHtml(getCategoryLabel(market))} | ${escapeHtml(formatCompactUsd(market.volume))}</div>
+            <div class="poly-side-item__meta">${escapeHtml(getPolymarketCategoryLabel(market))} | ${escapeHtml(formatCompactUsd(market.volume))}</div>
           </div>
-          <span class="poly-side-item__prob">${Number.isFinite(market.yesPct) ? `${market.yesPct.toFixed(0)}%` : '--'}</span>
+          ${buildAnimatedInlineMarkup(`poly:breaking:${market.market_slug}:yes`, Number.isFinite(market.yesPct) ? `${market.yesPct.toFixed(0)}%` : '--', market.yesPct, 'span', 'poly-side-item__prob')}
         </article>
       `).join('');
+      applyAnimatedValues(breakingEl);
     }
   }
 
   if (hotTopicsEl) {
-    if (topicRows.length === 0) {
+    if (!topicRows.length) {
       hotTopicsEl.innerHTML = '<div class="feature-note">Topics will appear here automatically.</div>';
     } else {
       hotTopicsEl.innerHTML = topicRows.map((topic) => `
@@ -1729,6 +2033,8 @@ function renderPolymarketDashboard(btcTick, markets) {
         </button>
       `).join('');
       hotTopicsEl.querySelectorAll('[data-poly-topic]').forEach((btn) => {
+        if (btn.dataset.bound) return;
+        btn.dataset.bound = '1';
         btn.addEventListener('click', () => {
           setPolymarketCategory(btn.dataset.polyTopic || 'all');
           renderPolymarketDashboard();
@@ -1742,164 +2048,225 @@ function renderPolymarketDashboard(btcTick, markets) {
       featuredEl.innerHTML = `
         <div class="empty-state">
           <div class="empty-state__title">No featured market yet</div>
-          <div class="empty-state__sub">Try another category or wait for the next collector sync.</div>
+          <div class="empty-state__sub">Try another category or wait for the next refresh.</div>
         </div>
       `;
     } else {
-      const yesPctText = Number.isFinite(featuredMarket.yesPct) ? `${featuredMarket.yesPct.toFixed(0)}%` : '--';
-      const noPctText = Number.isFinite(featuredMarket.noPct) ? `${featuredMarket.noPct.toFixed(0)}%` : '--';
-      const yesText = Number.isFinite(featuredMarket.yesPct) ? `${Math.round(featuredMarket.yesPct)}c` : '--';
-      const noText = Number.isFinite(featuredMarket.noPct) ? `${Math.round(featuredMarket.noPct)}c` : '--';
+      const odds = buildProbabilityCells(featuredMarket, `poly:featured:${featuredMarket.market_slug}`, 'featured');
       const categoryLine = (featuredMarket.categories || [])
         .filter((category) => category !== 'all')
         .slice(0, 3)
         .map((category) => POLY_LABELS[category] || category)
         .join(' • ');
       featuredEl.innerHTML = `
-        <div class="poly-featured-card__head">
-          <div>
-            <div class="poly-featured-card__eyebrow">${escapeHtml(categoryLine || getCategoryLabel(featuredMarket))}</div>
-            <h3 class="poly-featured-card__title">${escapeHtml(featuredMarket.title)}</h3>
+        <article class="poly-featured-card__panel poly-market-trigger" ${buildMarketTriggerAttr(featuredMarket)}>
+          <div class="poly-featured-card__head">
+            <div>
+              <div class="poly-featured-card__eyebrow">${escapeHtml(categoryLine || getPolymarketCategoryLabel(featuredMarket))}</div>
+              <h3 class="poly-featured-card__title">${escapeHtml(featuredMarket.title)}</h3>
+            </div>
+            <span class="polymarket-card__status ${getPolymarketStatusClass(featuredMarket)}">${getPolymarketStatusText(featuredMarket)}</span>
           </div>
-          <span class="polymarket-card__status ${featuredMarket.status.includes('resolved') ? 'status-resolved' : featuredMarket.status.includes('closed') ? 'status-closed' : 'status-active'}">${getStatusText(featuredMarket)}</span>
-        </div>
-        <div class="poly-featured-card__body">
-          <div class="poly-featured-card__pricing">
-            <div class="poly-featured-stat">
-              <span class="poly-featured-stat__label">Volume</span>
-              <span class="poly-featured-stat__value">${formatCompactUsd(featuredMarket.volume)}</span>
+          <div class="poly-featured-card__body">
+            <div class="poly-featured-card__pricing">
+              <div class="poly-featured-stat">
+                <span class="poly-featured-stat__label">Volume</span>
+                <span class="poly-featured-stat__value">${formatCompactUsd(featuredMarket.volume)}</span>
+              </div>
+              <div class="poly-featured-stat">
+                <span class="poly-featured-stat__label">Liquidity</span>
+                <span class="poly-featured-stat__value">${formatCompactUsd(featuredMarket.liquidity)}</span>
+              </div>
+              <div class="poly-featured-stat">
+                <span class="poly-featured-stat__label">Ends</span>
+                <span class="poly-featured-stat__value">${escapeHtml(getPolymarketEndText(featuredMarket))}</span>
+              </div>
             </div>
-            <div class="poly-featured-stat">
-              <span class="poly-featured-stat__label">Liquidity</span>
-              <span class="poly-featured-stat__value">${formatCompactUsd(featuredMarket.liquidity)}</span>
-            </div>
-            <div class="poly-featured-stat">
-              <span class="poly-featured-stat__label">Ends</span>
-              <span class="poly-featured-stat__value">${escapeHtml(getEndText(featuredMarket))}</span>
+            <div class="poly-featured-odds">
+              <div class="poly-featured-odd poly-featured-odd--yes">
+                <span class="poly-featured-odd__name">Yes</span>
+                ${odds.yesPctMarkup}
+                ${odds.yesValueMarkup}
+              </div>
+              <div class="poly-featured-odd poly-featured-odd--no">
+                <span class="poly-featured-odd__name">No</span>
+                ${odds.noPctMarkup}
+                ${odds.noValueMarkup}
+              </div>
             </div>
           </div>
-          <div class="poly-featured-odds">
-            <div class="poly-featured-odd poly-featured-odd--yes">
-              <span class="poly-featured-odd__name">Yes</span>
-              <strong>${yesPctText}</strong>
-              <span>${yesText}</span>
-            </div>
-            <div class="poly-featured-odd poly-featured-odd--no">
-              <span class="poly-featured-odd__name">No</span>
-              <strong>${noPctText}</strong>
-              <span>${noText}</span>
-            </div>
-          </div>
-        </div>
+        </article>
       `;
+      applyAnimatedValues(featuredEl);
     }
   }
 
   if (spotlightEl) {
-    if (spotlightMarkets.length === 0) {
+    if (!spotlightMarkets.length) {
       spotlightEl.innerHTML = '<div class="feature-note">More spotlight markets will appear here.</div>';
     } else {
       spotlightEl.innerHTML = spotlightMarkets.map((market) => `
-        <article class="poly-spotlight-card">
-          <div class="poly-spotlight-card__cat">${escapeHtml(getCategoryLabel(market))}</div>
+        <article class="poly-spotlight-card poly-market-trigger" ${buildMarketTriggerAttr(market)}>
+          <div class="poly-spotlight-card__cat">${escapeHtml(getPolymarketCategoryLabel(market))}</div>
           <div class="poly-spotlight-card__title">${escapeHtml(market.title)}</div>
-          <div class="poly-spotlight-card__meta">${escapeHtml(getStatusText(market))} | ${escapeHtml(formatCompactUsd(market.volume))}</div>
-          <div class="poly-spotlight-card__prob">${Number.isFinite(market.yesPct) ? `${market.yesPct.toFixed(0)}% YES` : '--'}</div>
+          <div class="poly-spotlight-card__meta">${escapeHtml(getPolymarketStatusText(market))} | ${escapeHtml(formatCompactUsd(market.volume))}</div>
+          ${buildAnimatedInlineMarkup(`poly:spotlight:${market.market_slug}:yes`, Number.isFinite(market.yesPct) ? `${market.yesPct.toFixed(1)}% YES` : '--', market.yesPct, 'div', 'poly-spotlight-card__prob')}
         </article>
       `).join('');
+      applyAnimatedValues(spotlightEl);
     }
   }
 
   if (!listEl) return;
-  if (!Array.isArray(filtered) || filtered.length === 0) {
+  if (!filtered.length) {
     listEl.innerHTML = `
       <div class="empty-state">
         <div class="empty-state__title">No markets in this tab yet</div>
-        <div class="empty-state__sub">Try another category, clear search, or wait for the next collector sync.</div>
+        <div class="empty-state__sub">Try another category, clear search, or wait for the next refresh.</div>
       </div>
     `;
-    return;
+  } else {
+    const top = filtered.slice(0, Math.max(12, polymarketState.renderCount || 60));
+    listEl.innerHTML = top.map((market) => {
+      const leadCategory = (market.categories || []).find((category) => iconByCategory[category]) || market.category;
+      const categoryIcon = iconByCategory[leadCategory] || 'Mk';
+      const typeLabel = typeLabelMap[market.marketType] || 'General';
+      const probWidth = Number.isFinite(market.yesPct) ? Math.max(2, Math.min(98, market.yesPct)) : 50;
+      const odds = buildProbabilityCells(market, `poly:grid:${market.market_slug}`);
+      return `
+        <article class="polymarket-card poly-market-trigger" ${buildMarketTriggerAttr(market)}>
+          <div class="polymarket-card__head">
+            <div class="polymarket-card__asset">${escapeHtml(categoryIcon)}</div>
+            <div class="polymarket-card__title-wrap">
+              <div class="polymarket-card__title">${escapeHtml(market.title)}</div>
+              <div class="polymarket-card__catline">${escapeHtml(getPolymarketCategoryLabel(market))} | ${escapeHtml(typeLabel)}</div>
+            </div>
+            <span class="polymarket-card__status ${getPolymarketStatusClass(market)}">${getPolymarketStatusText(market)}</span>
+          </div>
+          <div class="polymarket-card__odds">
+            <div class="poly-odd poly-odd--yes">
+              <div class="poly-odd__label">Yes</div>
+              ${odds.yesValueMarkup}
+              ${odds.yesPctMarkup}
+            </div>
+            <div class="poly-odd poly-odd--no">
+              <div class="poly-odd__label">No</div>
+              ${odds.noValueMarkup}
+              ${odds.noPctMarkup}
+            </div>
+          </div>
+          <div class="poly-prob-row">
+            <span>YES probability: ${escapeHtml(odds.yesPctText)}</span>
+            <span>NO probability: ${escapeHtml(odds.noPctText)}</span>
+          </div>
+          <div class="poly-prob-track" aria-label="Yes probability">
+            <span class="poly-prob-fill" style="width:${probWidth.toFixed(1)}%"></span>
+          </div>
+          <div class="polymarket-card__meta">
+            <span>Volume: ${formatCompactUsd(market.volume)}</span>
+            <span>Liquidity: ${formatCompactUsd(market.liquidity)}</span>
+            <span>Ends: ${escapeHtml(getPolymarketEndText(market))}</span>
+          </div>
+        </article>
+      `;
+    }).join('');
+    applyAnimatedValues(listEl);
   }
 
-  const top = filtered.slice(0, 60);
-  listEl.innerHTML = top.map((market) => {
-    const category = getCategoryLabel(market);
-    const iconByCategory = {
-      trending: 'Tr',
-      breaking: 'Br',
-      new: 'Nw',
-      politics: 'Po',
-      crypto: '₿',
-      finance: 'Fi',
-      oil: 'Oi',
-      geopolitics: 'Ge',
-      xauusd: 'Au',
-    };
-    const leadCategory = (market.categories || []).find((category) => iconByCategory[category]) || market.category;
-    const categoryIcon = iconByCategory[leadCategory] || 'Mk';
-    const typeLabelMap = {
-      all: 'General',
-      up_down: 'Up / Down',
-      above_below: 'Above / Below',
-      price_range: 'Price Range',
-      hit_price: 'Hit Price',
-    };
-    const typeLabel = typeLabelMap[market.marketType] || 'General';
-    const yesText = Number.isFinite(market.yesPct) ? `${Math.round(market.yesPct)}c` : '--';
-    const noText = Number.isFinite(market.noPct) ? `${Math.round(market.noPct)}c` : '--';
-    const yesPctText = Number.isFinite(market.yesPct) ? `${market.yesPct.toFixed(1)}%` : '--';
-    const noPctText = Number.isFinite(market.noPct) ? `${market.noPct.toFixed(1)}%` : '--';
-    const probWidth = Number.isFinite(market.yesPct) ? Math.max(2, Math.min(98, market.yesPct)) : 50;
-    const volText = Number.isFinite(market.volume) ? formatCompactUsd(market.volume) : '--';
-    const liqText = Number.isFinite(market.liquidity) ? formatCompactUsd(market.liquidity) : '--';
-    const endText = getEndText(market);
-    let statusText = 'ACTIVE';
-    let statusClass = 'status-active';
-    if (market.status.includes('closed')) {
-      statusText = 'CLOSED';
-      statusClass = 'status-closed';
-    } else if (market.status.includes('resolved')) {
-      statusText = 'RESOLVED';
-      statusClass = 'status-resolved';
+  document.querySelectorAll('[data-poly-open-market]').forEach((node) => {
+    if (node.dataset.polyBound) return;
+    node.dataset.polyBound = '1';
+    if (!['BUTTON', 'A'].includes(node.tagName)) {
+      node.setAttribute('tabindex', node.getAttribute('tabindex') || '0');
+      node.setAttribute('role', node.getAttribute('role') || 'button');
     }
+    const openMarket = () => {
+      const slug = String(node.getAttribute('data-poly-open-market') || '').trim();
+      if (!slug) return;
+      setSelectedPolymarketMarketSlug(slug);
+      renderPolymarketDashboard();
+    };
+    node.addEventListener('click', openMarket);
+    node.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openMarket();
+      }
+    });
+  });
 
-    return `
-      <article class="polymarket-card">
-        <div class="polymarket-card__head">
-          <div class="polymarket-card__asset">${escapeHtml(categoryIcon)}</div>
-          <div class="polymarket-card__title-wrap">
-            <div class="polymarket-card__title">${escapeHtml(market.title)}</div>
-            <div class="polymarket-card__catline">${escapeHtml(category)} | ${escapeHtml(typeLabel)}</div>
+  if (detailBackdrop && detailSheet && detailTitleEl && detailBodyEl) {
+    const shouldOpen = Boolean(selectedMarket);
+    detailBackdrop.hidden = !shouldOpen;
+    detailSheet.hidden = !shouldOpen;
+    detailSheet.setAttribute('aria-hidden', shouldOpen ? 'false' : 'true');
+    document.body.classList.toggle('poly-detail-open', shouldOpen);
+
+    if (shouldOpen && selectedMarket) {
+      const categoryLine = (selectedMarket.categories || [])
+        .filter((category) => category !== 'all')
+        .map((category) => POLY_LABELS[category] || category)
+        .join(' • ');
+      const historyRows = polymarketState.historyBySlug[selectedMarket.market_slug] || [];
+      const detailOdds = buildProbabilityCells(selectedMarket, `poly:detail:${selectedMarket.market_slug}`, 'featured');
+      detailTitleEl.textContent = selectedMarket.title;
+      detailBodyEl.innerHTML = `
+        <section class="poly-detail-section">
+          <div class="poly-detail-badges">
+            <span class="polymarket-card__status ${getPolymarketStatusClass(selectedMarket)}">${getPolymarketStatusText(selectedMarket)}</span>
+            <span class="poly-detail-chip">${escapeHtml(categoryLine || getPolymarketCategoryLabel(selectedMarket))}</span>
+            <span class="poly-detail-chip">${escapeHtml(typeLabelMap[selectedMarket.marketType] || 'General')}</span>
+            <span class="poly-detail-chip">${escapeHtml(getPolymarketEndText(selectedMarket))}</span>
           </div>
-          <span class="polymarket-card__status ${statusClass}">${statusText}</span>
-        </div>
-        <div class="polymarket-card__odds">
-          <div class="poly-odd poly-odd--yes">
-            <div class="poly-odd__label">Yes</div>
-            <div class="poly-odd__value">${yesText}</div>
-            <div class="poly-odd__pct">${yesPctText}</div>
+          <div class="poly-detail-odds">
+            <div class="poly-featured-odd poly-featured-odd--yes">
+              <span class="poly-featured-odd__name">Yes</span>
+              ${detailOdds.yesPctMarkup}
+              ${detailOdds.yesValueMarkup}
+            </div>
+            <div class="poly-featured-odd poly-featured-odd--no">
+              <span class="poly-featured-odd__name">No</span>
+              ${detailOdds.noPctMarkup}
+              ${detailOdds.noValueMarkup}
+            </div>
           </div>
-          <div class="poly-odd poly-odd--no">
-            <div class="poly-odd__label">No</div>
-            <div class="poly-odd__value">${noText}</div>
-            <div class="poly-odd__pct">${noPctText}</div>
+        </section>
+        <section class="poly-detail-section poly-detail-grid">
+          <div class="poly-detail-stat">
+            <span class="poly-detail-stat__label">Volume</span>
+            <strong>${formatCompactUsd(selectedMarket.volume)}</strong>
           </div>
-        </div>
-        <div class="poly-prob-row">
-          <span>YES probability: ${yesPctText}</span>
-          <span>NO probability: ${noPctText}</span>
-        </div>
-        <div class="poly-prob-track" aria-label="Yes probability">
-          <span class="poly-prob-fill" style="width:${probWidth.toFixed(1)}%"></span>
-        </div>
-        <div class="polymarket-card__meta">
-          <span>Volume: ${volText}</span>
-          <span>Liquidity: ${liqText}</span>
-          <span>Ends: ${endText}</span>
-        </div>
-      </article>
-    `;
-  }).join('');
+          <div class="poly-detail-stat">
+            <span class="poly-detail-stat__label">Liquidity</span>
+            <strong>${formatCompactUsd(selectedMarket.liquidity)}</strong>
+          </div>
+          <div class="poly-detail-stat">
+            <span class="poly-detail-stat__label">Last sync</span>
+            <strong>${escapeHtml(formatMalaysiaTime(selectedMarket.provider_ts || polymarketState.feedStatus.fetchedAt, true) || '--')}</strong>
+          </div>
+          <div class="poly-detail-stat">
+            <span class="poly-detail-stat__label">Source</span>
+            <strong>${escapeHtml(polymarketState.feedStatus.sourceLabel || 'Live Gamma')}</strong>
+          </div>
+        </section>
+        <section class="poly-detail-section">
+          <div class="poly-detail-section__title">Probability history</div>
+          ${buildPolymarketHistoryChartMarkup(historyRows, selectedMarket)}
+        </section>
+        <section class="poly-detail-section poly-detail-grid">
+          <div class="poly-detail-stat">
+            <span class="poly-detail-stat__label">Market slug</span>
+            <strong>${escapeHtml(selectedMarket.market_slug)}</strong>
+          </div>
+          <div class="poly-detail-stat">
+            <span class="poly-detail-stat__label">Display freshness</span>
+            <strong>${escapeHtml(buildPolymarketFreshnessSummary(polymarketState.feedStatus))}</strong>
+          </div>
+        </section>
+      `;
+      applyAnimatedValues(detailBodyEl);
+    }
+  }
 }
 function renderStats(stats) {
   if (!stats) return;
@@ -2246,6 +2613,7 @@ window.UI = {
   initNavigation,
   initDashboardSwitch,
   initPolymarketControls,
+  getSelectedPolymarketMarketSlug,
   getSelectedSignalLane,
   setSelectedSignalLane,
   setDashboardMode,
@@ -2268,6 +2636,7 @@ window.UI = {
   initDemoControls,
   renderDemoDashboard,
   renderDemoEquityCurve,
+  setPolymarketMarketHistory,
   updateRiskCalc,
 };
 

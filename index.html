@@ -240,33 +240,6 @@
 
         <section class="page page--polymarket" id="page-polymarket">
           <div class="poly-home-hero">
-            <div class="poly-overview-bar">
-              <div class="poly-overview-main">
-                <div class="polymarket-btc">
-                  <div class="polymarket-btc__eyebrow">Polymarket Pulse</div>
-                  <div class="polymarket-btc__label">Bitcoin Spot (USD)</div>
-                  <div class="polymarket-btc__price" id="polymarket-btc-price">$--</div>
-                  <div class="polymarket-btc__change" id="polymarket-btc-change">Waiting for feed...</div>
-                  <div class="signal-hero__time" id="polymarket-last-sync">Last sync: --</div>
-                </div>
-                <span class="poly-live-pill">Live</span>
-              </div>
-              <div class="poly-kpi-grid poly-kpi-grid--compact">
-                <div class="poly-kpi">
-                  <div class="poly-kpi__label">Markets</div>
-                  <div class="poly-kpi__value" id="polymarket-kpi-count">--</div>
-                </div>
-                <div class="poly-kpi">
-                  <div class="poly-kpi__label">Total Volume</div>
-                  <div class="poly-kpi__value" id="polymarket-kpi-volume">--</div>
-                </div>
-                <div class="poly-kpi">
-                  <div class="poly-kpi__label">Ending Soon</div>
-                  <div class="poly-kpi__value" id="polymarket-kpi-ending">--</div>
-                </div>
-              </div>
-            </div>
-
             <div class="poly-editorial-rail">
               <section class="poly-side-panel">
                 <div class="poly-side-panel__head">
@@ -303,6 +276,21 @@
                 <option value="probability">Probability</option>
               </select>
             </label>
+            <div class="poly-toolbar__summary" aria-live="polite">
+              <div class="poly-toolbar__summary-item">
+                <span class="poly-toolbar__summary-label">BTC Spot</span>
+                <strong class="polymarket-btc__price" id="polymarket-btc-price">$--</strong>
+              </div>
+              <div class="poly-toolbar__summary-item">
+                <span class="poly-toolbar__summary-label">24h</span>
+                <span class="polymarket-btc__change" id="polymarket-btc-change">Waiting for feed...</span>
+              </div>
+              <div class="poly-toolbar__summary-item">
+                <span class="poly-toolbar__summary-label">Freshness</span>
+                <span class="signal-hero__time" id="polymarket-last-sync">Last sync: --</span>
+              </div>
+              <span class="poly-live-pill" id="polymarket-live-pill">Waiting for feed</span>
+            </div>
           </div>
 
           <div class="feature-note poly-diagnostics" id="polymarket-diagnostics">Loaded -- mapped markets | -- unmatched</div>
@@ -344,6 +332,22 @@
             <div class="empty-state">
               <div class="empty-state__title">No market data yet</div>
               <div class="empty-state__sub">Collector will populate this section automatically</div>
+            </div>
+          </div>
+
+          <div class="poly-detail-backdrop" id="polymarket-detail-backdrop" hidden></div>
+          <div class="poly-detail-sheet" id="polymarket-detail-sheet" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="polymarket-detail-title">
+            <div class="poly-detail-sheet__card">
+              <div class="poly-detail-sheet__head">
+                <div>
+                  <div class="poly-detail-sheet__eyebrow">Market detail</div>
+                  <div class="poly-detail-sheet__title" id="polymarket-detail-title">Loading market...</div>
+                </div>
+                <button type="button" class="poly-detail-sheet__close" id="polymarket-detail-close">Close</button>
+              </div>
+              <div class="poly-detail-sheet__body" id="polymarket-detail-body">
+                <div class="feature-note">Choose a market card to inspect its detail.</div>
+              </div>
             </div>
           </div>
         </section>
