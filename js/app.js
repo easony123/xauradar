@@ -32,6 +32,10 @@ window.__currentSignal = null;
 const XAU_MARKET_REOPEN_SUNDAY_UTC_HOUR = 22;
 const XAU_MARKET_CLOSE_FRIDAY_UTC_HOUR = 22;
 
+function hasUsablePolymarketFeed(feed) {
+  return Boolean(feed && Array.isArray(feed.markets) && feed.markets.length);
+}
+
 function isXauMarketOpen(now = new Date()) {
   const weekday = now.getUTCDay(); // 0=Sun, 5=Fri, 6=Sat
   const totalMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
@@ -242,12 +246,10 @@ function startPolling() {
 
   pollPrice(true);
   pollSupabase();
-  pollDXY();
   pollPolymarket();
 
   setInterval(pollPrice, 30000);
   setInterval(pollSupabase, 30000);
-  setInterval(pollDXY, 60000);
   setInterval(pollPolymarket, 3000);
 }
 
@@ -276,8 +278,9 @@ async function pollPolymarket() {
       API.fetchPolymarketLiveMarkets(),
       API.fetchPolymarketMarkets(),
     ]);
-    lastPolymarketBtc = btcTick || null;
+    lastPolymarketBtc = btcTick || lastPolymarketBtc || null;
     const cachedFallback = Array.isArray(fallbackMarkets) ? fallbackMarkets : [];
+    const hasPreviousLive = hasUsablePolymarketFeed(lastPolymarketFeed);
 
     let nextFeed = {
       ...lastPolymarketFeed,
@@ -291,8 +294,20 @@ async function pollPolymarket() {
         markets: liveFeed.markets,
         liveOk: true,
         fallbackUsed: false,
-        sourceMode: 'live',
-        sourceLabel: 'Live Gamma',
+        sourceMode: String(liveFeed.sourceMode || 'live'),
+        sourceLabel: String(liveFeed.sourceLabel || 'Supabase Edge proxy'),
+      };
+    } else if (hasPreviousLive) {
+      nextFeed = {
+        ...nextFeed,
+        markets: lastPolymarketFeed.markets,
+        slices: lastPolymarketFeed.slices,
+        liveOk: false,
+        fallbackUsed: false,
+        sourceMode: 'stale',
+        sourceLabel: String(lastPolymarketFeed.sourceLabel || 'Holding last live values'),
+        error: liveFeed?.error || 'Polymarket live refresh failed',
+        fetchedAt: lastPolymarketFeed.fetchedAt || liveFeed?.fetchedAt || new Date().toISOString(),
       };
     } else if (cachedFallback.length) {
       nextFeed = {
@@ -302,15 +317,18 @@ async function pollPolymarket() {
         fallbackUsed: true,
         sourceMode: 'fallback',
         sourceLabel: 'Supabase cache fallback',
+        error: liveFeed?.error || '',
         fetchedAt: liveFeed?.fetchedAt || cachedFallback[0]?.provider_ts || new Date().toISOString(),
       };
     } else {
       nextFeed = {
         ...nextFeed,
         liveOk: false,
-        fallbackUsed: Boolean(lastPolymarketFeed.markets?.length),
-        sourceMode: lastPolymarketFeed.markets?.length ? 'stale' : 'error',
-        sourceLabel: lastPolymarketFeed.markets?.length ? 'Holding last live values' : 'No live data',
+        fallbackUsed: false,
+        markets: [],
+        slices: { trending: [], breaking: [], new: [] },
+        sourceMode: 'error',
+        sourceLabel: 'No live data yet',
         error: liveFeed?.error || 'Polymarket live refresh failed',
       };
     }
@@ -388,11 +406,6 @@ async function pollSupabase() {
   } catch (err) {
     console.error('Supabase poll error:', err.message);
   }
-}
-
-async function pollDXY() {
-  const data = await API.fetchDXYPrice();
-  UI.renderDXY(data);
 }
 
 function fireAlert(signal) {

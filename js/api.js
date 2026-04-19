@@ -7,6 +7,7 @@
 // Supabase config
 const SUPABASE_URL = 'https://autbjwirftpixizrrzhw.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_A_gXMbmff2IFJbZX1wsKrA_sXz6jzkQ';
+const POLYMARKET_PROXY_URL = `${SUPABASE_URL}/functions/v1/polymarket-collector`;
 
 // State
 let supabaseClient = null;
@@ -314,6 +315,26 @@ async function fetchPolymarketGammaJson(path, params = {}) {
   });
   if (!response.ok) {
     throw new Error(`Gamma ${path} request failed with ${response.status}`);
+  }
+  return response.json();
+}
+
+async function fetchPolymarketProxyJson(params = {}) {
+  const url = new URL(POLYMARKET_PROXY_URL);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      url.searchParams.set(key, String(value));
+    }
+  });
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      apikey: SUPABASE_ANON_KEY,
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`Polymarket proxy request failed with ${response.status}`);
   }
   return response.json();
 }
@@ -814,67 +835,45 @@ async function fetchPolymarketMarketHistory(marketSlug, limit = 120) {
 async function fetchPolymarketLiveMarkets() {
   const fetchedAt = new Date().toISOString();
   try {
-    const [trendingRows, activeRows, recentRows, commodityRows] = await Promise.all([
-      fetchPolymarketLiveSlice('top', {
-        active: 'true',
-        closed: 'false',
-        order: 'volumeNum',
-        ascending: 'false',
-      }, 120),
-      fetchPolymarketLiveSlice('active', {
-        active: 'true',
-        closed: 'false',
-        order: 'volumeNum',
-        ascending: 'false',
-      }, 320),
-      fetchPolymarketLiveSlice('recent', {
-        active: 'true',
-        closed: 'false',
-        order: 'createdAt',
-        ascending: 'false',
-      }, 120),
-      fetchPolymarketCommodityLiveMarkets(120),
-    ]);
+    const payload = await fetchPolymarketProxyJson({ mode: 'live' });
+    const markets = Array.isArray(payload?.markets)
+      ? payload.markets.map((row) => normalizePolymarketApiRow(row, row?.meta?.collector_source || 'proxy')).filter(Boolean)
+      : [];
+    const trendingRows = Array.isArray(payload?.slices?.trending)
+      ? payload.slices.trending.map((row) => normalizePolymarketApiRow(row, row?.meta?.collector_source || 'top')).filter(Boolean)
+      : [];
+    const breakingRows = Array.isArray(payload?.slices?.breaking)
+      ? payload.slices.breaking.map((row) => normalizePolymarketApiRow(row, row?.meta?.collector_source || 'breaking')).filter(Boolean)
+      : [];
+    const recentRows = Array.isArray(payload?.slices?.new)
+      ? payload.slices.new.map((row) => normalizePolymarketApiRow(row, row?.meta?.collector_source || 'recent')).filter(Boolean)
+      : [];
 
-    const activeOnly = mergePolymarketMarketLists(activeRows, commodityRows)
-      .filter((row) => String(row.status || 'active').toLowerCase() === 'active');
-    const breakingSlice = activeOnly
-      .filter((row) => {
-        const meta = row.meta && typeof row.meta === 'object' ? row.meta : {};
-        const displayCategories = Array.isArray(meta.display_categories) ? meta.display_categories : [];
-        const text = [
-          row.title,
-          row.category,
-          String(meta.raw_category || ''),
-          displayCategories.join(' '),
-        ].join(' ');
-        return displayCategories.includes('breaking') || looksLikeBreakingMarket(text);
-      })
-      .sort((a, b) => parseNumber(b.volume, 0) - parseNumber(a.volume, 0))
-      .slice(0, 40);
+    if (!markets.length) {
+      throw new Error(String(payload?.error || 'Polymarket proxy returned no markets'));
+    }
 
-    const merged = mergePolymarketMarketLists(trendingRows, activeRows, recentRows, commodityRows, breakingSlice);
     return {
       liveOk: true,
       fallbackUsed: false,
       sourceMode: 'live',
-      sourceLabel: 'Live Gamma',
-      fetchedAt,
+      sourceLabel: String(payload?.sourceLabel || 'Supabase Edge proxy'),
+      fetchedAt: payload?.fetchedAt || fetchedAt,
       error: '',
-      markets: merged,
+      markets,
       slices: {
         trending: trendingRows,
-        breaking: breakingSlice,
+        breaking: breakingRows,
         new: recentRows,
       },
     };
   } catch (err) {
-    console.error('Polymarket live Gamma fetch error:', err.message);
+    console.error('Polymarket live proxy fetch error:', err.message);
     return {
       liveOk: false,
       fallbackUsed: false,
       sourceMode: 'error',
-      sourceLabel: 'Live Gamma unavailable',
+      sourceLabel: 'Supabase Edge proxy unavailable',
       fetchedAt,
       error: err.message,
       markets: [],
@@ -891,16 +890,10 @@ async function fetchPolymarketLiveDetail(marketSlug) {
   const slug = String(marketSlug || '').trim();
   if (!slug) return null;
   try {
-    const exactRows = await fetchPolymarketGammaJson('/markets', {
-      slug,
-      limit: 3,
-      offset: 0,
-    });
-    if (Array.isArray(exactRows) && exactRows.length) {
-      const normalized = exactRows
-        .map((row) => normalizePolymarketApiRow(row, 'detail'))
-        .filter(Boolean);
-      if (normalized.length) return normalized[0];
+    const payload = await fetchPolymarketProxyJson({ detail_slug: slug });
+    if (payload?.market) {
+      const normalized = normalizePolymarketApiRow(payload.market, payload?.market?.meta?.collector_source || 'detail');
+      if (normalized) return normalized;
     }
   } catch (err) {
     console.warn('Polymarket live detail fetch warning:', err.message);

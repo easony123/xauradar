@@ -11,6 +11,7 @@ const GOOGLE_TRANSLATE_SCRIPT_ID = 'xauradar-google-translate-script';
 const GOOGLE_TRANSLATE_CALLBACK = '__xauRadarGoogleTranslateInit';
 const DASHBOARD_MODE_KEY = 'xauradar_dashboard_mode';
 const SIGNAL_LANE_KEY = 'xauradar_signal_lane';
+const SIGNAL_EXPANDED_KEY = 'xauradar_signal_expanded';
 const POLY_CATEGORY_KEY = 'xauradar_poly_category';
 const POLY_SORT_KEY = 'xauradar_poly_sort';
 const POLY_VIEW_KEY = 'xauradar_poly_view';
@@ -21,6 +22,7 @@ let lastXauPage = 'signal';
 const polymarketState = {
   btcTick: null,
   markets: [],
+  fallbackMarkets: [],
   slices: { trending: [], breaking: [], new: [] },
   feedStatus: {
     liveOk: false,
@@ -61,6 +63,41 @@ const animatedValueState = new Map();
 
 function getSelectedSignalLane() {
   return String(localStorage.getItem(SIGNAL_LANE_KEY) || 'intraday').toLowerCase() === 'swing' ? 'swing' : 'intraday';
+}
+
+function getExpandedSignalLanes() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SIGNAL_EXPANDED_KEY) || '{}');
+    return {
+      intraday: Boolean(parsed?.intraday),
+      swing: Boolean(parsed?.swing),
+    };
+  } catch {
+    return { intraday: false, swing: false };
+  }
+}
+
+function isSignalLaneExpanded(lane) {
+  const normalized = String(lane || 'intraday').toLowerCase() === 'swing' ? 'swing' : 'intraday';
+  return Boolean(getExpandedSignalLanes()[normalized]);
+}
+
+function setSignalLaneExpanded(lane, expanded, emit = true) {
+  const normalized = String(lane || 'intraday').toLowerCase() === 'swing' ? 'swing' : 'intraday';
+  const next = {
+    ...getExpandedSignalLanes(),
+    [normalized]: Boolean(expanded),
+  };
+  localStorage.setItem(SIGNAL_EXPANDED_KEY, JSON.stringify(next));
+  if (emit && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('xauradar:signal-lane-expand', { detail: { lane: normalized, expanded: Boolean(expanded) } }));
+  }
+  return next[normalized];
+}
+
+function toggleSignalLaneExpanded(lane, emit = true) {
+  const next = !isSignalLaneExpanded(lane);
+  return setSignalLaneExpanded(lane, next, emit);
 }
 
 function setSelectedSignalLane(lane, emit = true) {
@@ -300,6 +337,33 @@ function toMillisUi(value) {
   return Number.isFinite(ts) ? ts : null;
 }
 
+function buildPolymarketFreshnessSummary(feedStatus = {}) {
+  const mode = String(feedStatus?.sourceMode || 'idle').toLowerCase();
+  const sourceLabel = String(feedStatus?.sourceLabel || '').trim();
+  const fetchedAt = feedStatus?.fetchedAt || null;
+  const error = String(feedStatus?.error || '').trim();
+
+  if (mode === 'live') {
+    return fetchedAt
+      ? `${sourceLabel || 'Live Gamma'} updated ${formatTimeAgo(fetchedAt)}`
+      : (sourceLabel || 'Live Gamma active');
+  }
+
+  if (mode === 'fallback') {
+    return `${sourceLabel || 'Supabase cache fallback'} ${fetchedAt ? formatTimeAgo(fetchedAt) : 'recently'}`;
+  }
+
+  if (mode === 'stale') {
+    return `${sourceLabel || 'Holding last live values'} ${fetchedAt ? `from ${formatTimeAgo(fetchedAt)}` : ''}`.trim();
+  }
+
+  if (mode === 'error') {
+    return error ? `Live feed error: ${error}` : 'Live feed unavailable';
+  }
+
+  return sourceLabel || 'Waiting for live feed';
+}
+
 function updateDashboardTopbar(mode) {
   const assetLabel = document.getElementById('topbar-asset-label');
   const assetSub = document.getElementById('topbar-asset-sub');
@@ -434,6 +498,38 @@ function normalizePolymarketCategories(rawCategory, titleText = '', meta = null)
     visible.add(primary);
   }
 
+  const metaDisplay = String(meta?.display_category || meta?.displayCategory || '').trim().toLowerCase();
+  const rawSource = String(meta?.raw_category || meta?.rawCategory || rawCategory || '').trim().toLowerCase();
+  const text = `${metaDisplay} ${rawSource} ${String(titleText || '').toLowerCase()}`;
+
+  if (/(breaking|urgent|headline|flash|developing|ceasefire|deal|meeting|summit|talks|diplomatic|sanction|attack|missile|war|conflict|tariff|fed|fomc|rate cut|rate hike|interest rate|election|vote|approval|ban|default|bankruptcy|merger|earnings)/.test(text)) {
+    visible.add('breaking');
+  }
+  if (/(new|fresh|latest|launched|launch|recent)/.test(text)) {
+    visible.add('new');
+  }
+  if (/(trending|trend|top volume|most active)/.test(text)) {
+    visible.add('trending');
+  }
+  if (/(xauusd|xau|spot gold|gold price|bullion|precious metal)/.test(text)) {
+    visible.add('xauusd');
+  }
+  if (/(oil|wti|brent|crude|opec|energy)/.test(text)) {
+    visible.add('oil');
+  }
+  if (/(bitcoin|btc|ethereum|eth|solana|sol|crypto|token|coin|doge|memecoin|altcoin|defi|stablecoin|nft)/.test(text)) {
+    visible.add('crypto');
+  }
+  if (/(politics|election|president|senate|congress|minister|party|government|white house|parliament|trump|biden|campaign|vote|voting)/.test(text)) {
+    visible.add('politics');
+  }
+  if (/(war|geopolitic|geopolitics|conflict|russia|ukraine|china|taiwan|israel|middle east|iran|sanction|ceasefire|military|nato|putin|xi jinping|gaza|hezbollah)/.test(text)) {
+    visible.add('geopolitics');
+  }
+  if (/(fomc|fed|powell|rate|cpi|inflation|nfp|jobs|yield|treasury|tariff|economy|recession|gdp|finance|financial|stocks|nasdaq|s&p|dow|bond|dollar|usd|etf)/.test(text)) {
+    visible.add('finance');
+  }
+
   return Array.from(visible);
 }
 
@@ -496,6 +592,35 @@ function normalizePolymarketRow(row) {
     endDate,
     hoursUntil,
   };
+}
+
+function isPolymarketResolvedStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  return normalized.includes('resolved') || normalized.includes('closed') || normalized.includes('archived');
+}
+
+function isPolymarketActiveStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (!normalized) return true;
+  if (isPolymarketResolvedStatus(normalized)) return false;
+  return ['active', 'open', 'live'].includes(normalized) || !normalized.includes('inactive');
+}
+
+function filterPolymarketByView(markets, view) {
+  const rows = Array.isArray(markets) ? markets.slice() : [];
+  if (view === 'active') {
+    return rows.filter((market) => isPolymarketActiveStatus(market.status));
+  }
+  if (view === 'ending') {
+    return rows.filter((market) => isPolymarketActiveStatus(market.status)
+      && Number.isFinite(market.hoursUntil)
+      && market.hoursUntil >= 0
+      && market.hoursUntil <= 72);
+  }
+  if (view === 'resolved') {
+    return rows.filter((market) => isPolymarketResolvedStatus(market.status));
+  }
+  return rows;
 }
 
 function setPolymarketCategory(category, opts = {}) {
@@ -1140,17 +1265,24 @@ function renderSignalHero(decisionRun, signalsByLane = {}, currentPrice = null) 
   hero.innerHTML = `
     <div class="signal-hero-grid">
       ${lanes.map((lane) => {
+        const expanded = isSignalLaneExpanded(lane);
         const signal = laneModels.find((row) => String(row.lane || '').toLowerCase() === lane) || null;
         if (!signal) {
           return `
-            <button type="button" class="signal-lane-card signal-lane-card--empty ${selectedLane === lane ? 'is-selected' : ''}" data-lane="${lane}">
+            <article
+              class="signal-lane-card signal-lane-card--empty signal-lane-card--collapsed ${selectedLane === lane ? 'is-selected' : ''}"
+              data-lane="${lane}"
+              role="button"
+              tabindex="0"
+              aria-expanded="false"
+            >
               <div class="signal-lane-card__top">
                 <span class="lane-badge lane-badge--${lane}">${lane.toUpperCase()}</span>
                 <span class="signal-lane-card__state">WAITING</span>
               </div>
               <div class="signal-lane-card__side waiting">NO TRADE</div>
               <div class="signal-lane-card__reason">No lane decision yet.</div>
-            </button>
+            </article>
           `;
         }
 
@@ -1170,30 +1302,62 @@ function renderSignalHero(decisionRun, signalsByLane = {}, currentPrice = null) 
           : `${side && side !== 'WAIT' ? `Best setup: ${side}. ` : ''}${describeBlockedReason(reasonCode)}`;
         const regime = signal.h1_regime || signal?.conditions_met?.adaptive_exits?.regime || ((Number(signal.adx_value || 0) >= 20) ? 'Trending' : 'Range');
         const time = formatMalaysiaTime(signal.created_at);
+        const compactHint = tradable
+          ? 'Signal active'
+          : decisionState === 'NOT_READY'
+            ? 'Watching setup'
+            : 'Awaiting next engine update';
 
         return `
-          <button type="button" class="signal-lane-card ${selectedLane === lane ? 'is-selected' : ''}" data-lane="${lane}">
+          <article
+            class="signal-lane-card ${selectedLane === lane ? 'is-selected' : ''} ${expanded ? 'signal-lane-card--expanded' : 'signal-lane-card--collapsed'}"
+            data-lane="${lane}"
+            role="button"
+            tabindex="0"
+            aria-expanded="${expanded ? 'true' : 'false'}"
+          >
             <div class="signal-lane-card__top">
               <span class="lane-badge lane-badge--${lane}">${lane.toUpperCase()}</span>
-              <span class="signal-lane-card__state">${decisionState === 'IN_TRADE' ? 'IN TRADE' : decisionState}</span>
+              <div class="signal-lane-card__controls">
+                <span class="signal-lane-card__state">${decisionState === 'IN_TRADE' ? 'IN TRADE' : decisionState}</span>
+                <button type="button" class="signal-lane-card__toggle" data-lane-toggle="${lane}" aria-label="${expanded ? 'Hide signal details' : 'Expand signal details'}">
+                  ${expanded ? 'Hide' : 'Expand'}
+                </button>
+              </div>
             </div>
             <div class="signal-lane-card__side ${badgeClass}">${sideLabel}</div>
-            <div class="signal-lane-card__headline">${lane === 'swing' ? 'Swing market signal' : 'Intraday market signal'}</div>
-            <div class="signal-lane-card__reason">${reasonText}</div>
-            <div class="signal-lane-card__metrics">
-              <div class="hero-meter">
-                <div class="hero-meter__head">Score <strong class="${scoreClass}">${scoreNum.toFixed(1)}/100</strong></div>
-                <div class="hero-meter__track"><span class="hero-meter__fill ${scoreClass}" style="width:${scoreNum.toFixed(1)}%"></span></div>
+            ${expanded ? `
+              <div class="signal-lane-card__headline">${lane === 'swing' ? 'Swing market signal' : 'Intraday market signal'}</div>
+              <div class="signal-lane-card__reason">${reasonText}</div>
+            ` : `
+              <div class="signal-lane-card__summary-grid">
+                <div class="signal-lane-card__summary-stat">
+                  <span class="signal-lane-card__summary-label">Score</span>
+                  <strong class="signal-lane-card__summary-value ${scoreClass}">${scoreNum.toFixed(1)}</strong>
+                </div>
+                <div class="signal-lane-card__summary-stat">
+                  <span class="signal-lane-card__summary-label">Confidence</span>
+                  <strong class="signal-lane-card__summary-value ${confClass}">${confNum.toFixed(0)}%</strong>
+                </div>
               </div>
-              <div class="hero-meter">
-                <div class="hero-meter__head">Confidence <strong class="${confClass}">${confNum.toFixed(0)}%</strong></div>
-                <div class="hero-meter__track"><span class="hero-meter__fill ${confClass}" style="width:${confNum.toFixed(1)}%"></span></div>
+              <div class="signal-lane-card__summary">${compactHint}</div>
+            `}
+            <div class="signal-lane-card__details" ${expanded ? '' : 'hidden'}>
+              <div class="signal-lane-card__metrics">
+                <div class="hero-meter">
+                  <div class="hero-meter__head">Score <strong class="${scoreClass}">${scoreNum.toFixed(1)}/100</strong></div>
+                  <div class="hero-meter__track"><span class="hero-meter__fill ${scoreClass}" style="width:${scoreNum.toFixed(1)}%"></span></div>
+                </div>
+                <div class="hero-meter">
+                  <div class="hero-meter__head">Confidence <strong class="${confClass}">${confNum.toFixed(0)}%</strong></div>
+                  <div class="hero-meter__track"><span class="hero-meter__fill ${confClass}" style="width:${confNum.toFixed(1)}%"></span></div>
+                </div>
               </div>
+              <div class="signal-lane-card__meta">Trigger minimum: ${trigger.toFixed(0)}/100 | ${laneLabel(lane)}</div>
+              <div class="signal-lane-card__meta">Regime: ${regime} | Session: ${signal.session_context || '--'}</div>
+              <div class="signal-lane-card__time">${time || 'Waiting for engine update'}</div>
             </div>
-            <div class="signal-lane-card__meta">Trigger minimum: ${trigger.toFixed(0)}/100 | ${laneLabel(lane)}</div>
-            <div class="signal-lane-card__meta">Regime: ${regime} | Session: ${signal.session_context || '--'}</div>
-            <div class="signal-lane-card__time">${time || 'Waiting for engine update'}</div>
-          </button>
+          </article>
         `;
       }).join('')}
     </div>
@@ -1201,6 +1365,20 @@ function renderSignalHero(decisionRun, signalsByLane = {}, currentPrice = null) 
 
   hero.querySelectorAll('.signal-lane-card[data-lane]').forEach((card) => {
     card.addEventListener('click', () => setSelectedSignalLane(card.dataset.lane));
+    card.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        setSelectedSignalLane(card.dataset.lane);
+      }
+    });
+  });
+  hero.querySelectorAll('[data-lane-toggle]').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleSignalLaneExpanded(btn.dataset.laneToggle);
+      renderSignalHero(decisionRun, signalsByLane, currentPrice);
+    });
   });
 }
 
@@ -1455,40 +1633,6 @@ function renderConditions(decisionRun, snapshot, forcedLane = null) {
   });
 }
 
-function renderDXY(dxyData) {
-  const widget = document.getElementById('dxy-widget');
-  if (!widget) return;
-
-  const priceEl = widget.querySelector('.dxy-row__price');
-  const corrEl = widget.querySelector('.dxy-row__corr');
-
-  if (!dxyData || !dxyData.price) {
-    if (priceEl) priceEl.textContent = 'Unavailable';
-    if (corrEl) {
-      corrEl.textContent = 'Neutral (no DXY feed)';
-      corrEl.className = 'dxy-row__corr neutral';
-    }
-    return;
-  }
-
-  if (priceEl) priceEl.textContent = dxyData.price ? dxyData.price.toFixed(2) : '--';
-
-  if (corrEl && dxyData.direction) {
-    const xauDir = window._lastPriceDirection;
-    if (dxyData.direction === 'DOWN' && xauDir === 'up') {
-      corrEl.textContent = 'Confirms long';
-      corrEl.className = 'dxy-row__corr confirms';
-    } else if (dxyData.direction === 'UP' && xauDir === 'down') {
-      corrEl.textContent = 'Confirms short';
-      corrEl.className = 'dxy-row__corr confirms';
-    } else {
-      corrEl.textContent = 'Diverging';
-      corrEl.className = 'dxy-row__corr diverges';
-    }
-  }
-
-}
-
 function renderNewsBanner(events) {
   const banner = document.getElementById('news-banner');
   if (!banner) return;
@@ -1702,8 +1846,14 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
   }
   if (feedOrMarkets !== undefined) {
     if (Array.isArray(feedOrMarkets)) {
-      polymarketState.markets = feedOrMarkets.map(normalizePolymarketRow).filter(Boolean);
-      polymarketState.slices = { trending: [], breaking: [], new: [] };
+      const nextMarkets = feedOrMarkets.map(normalizePolymarketRow).filter(Boolean);
+      if (nextMarkets.length || !Array.isArray(polymarketState.markets) || !polymarketState.markets.length) {
+        polymarketState.markets = nextMarkets;
+      }
+      polymarketState.fallbackMarkets = nextMarkets;
+      if (!polymarketState.slices || typeof polymarketState.slices !== 'object') {
+        polymarketState.slices = { trending: [], breaking: [], new: [] };
+      }
       polymarketState.feedStatus = {
         ...polymarketState.feedStatus,
         sourceMode: 'fallback',
@@ -1711,11 +1861,25 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
       };
     } else if (feedOrMarkets && typeof feedOrMarkets === 'object') {
       const feed = feedOrMarkets;
-      polymarketState.markets = Array.isArray(feed.markets) ? feed.markets.map(normalizePolymarketRow).filter(Boolean) : [];
-      polymarketState.slices = {
+      const nextMarkets = Array.isArray(feed.markets) ? feed.markets.map(normalizePolymarketRow).filter(Boolean) : [];
+      const previousSlices = polymarketState.slices && typeof polymarketState.slices === 'object'
+        ? polymarketState.slices
+        : { trending: [], breaking: [], new: [] };
+      const nextSlices = {
         trending: Array.isArray(feed.slices?.trending) ? feed.slices.trending.map(normalizePolymarketRow).filter(Boolean) : [],
         breaking: Array.isArray(feed.slices?.breaking) ? feed.slices.breaking.map(normalizePolymarketRow).filter(Boolean) : [],
         new: Array.isArray(feed.slices?.new) ? feed.slices.new.map(normalizePolymarketRow).filter(Boolean) : [],
+      };
+      polymarketState.fallbackMarkets = Array.isArray(feed.fallbackMarkets)
+        ? feed.fallbackMarkets.map(normalizePolymarketRow).filter(Boolean)
+        : (polymarketState.fallbackMarkets || []);
+      if (nextMarkets.length || !Array.isArray(polymarketState.markets) || !polymarketState.markets.length) {
+        polymarketState.markets = nextMarkets;
+      }
+      polymarketState.slices = {
+        trending: nextSlices.trending.length ? nextSlices.trending : (previousSlices.trending || []),
+        breaking: nextSlices.breaking.length ? nextSlices.breaking : (previousSlices.breaking || []),
+        new: nextSlices.new.length ? nextSlices.new : (previousSlices.new || []),
       };
       polymarketState.feedStatus = {
         liveOk: Boolean(feed.liveOk),
@@ -1730,8 +1894,10 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
 
   const activeBtc = polymarketState.btcTick;
   const rawMarkets = Array.isArray(polymarketState.markets) ? polymarketState.markets : [];
-  const allMarkets = rawMarkets.filter((row) => Array.isArray(row.categories) && row.categories.some((cat) => POLY_CATEGORIES.includes(cat) && cat !== 'all'));
-  const unmatchedCount = Math.max(0, rawMarkets.length - allMarkets.length);
+  const fallbackMarkets = Array.isArray(polymarketState.fallbackMarkets) ? polymarketState.fallbackMarkets : [];
+  const renderableMarkets = (rawMarkets.length ? rawMarkets : fallbackMarkets).filter(Boolean);
+  const categorizedMarkets = renderableMarkets.filter((row) => Array.isArray(row.categories) && row.categories.some((cat) => POLY_CATEGORIES.includes(cat) && cat !== 'all'));
+  const unmatchedCount = Math.max(0, renderableMarkets.length - categorizedMarkets.length);
   const sorters = {
     volume: (a, b) => (Number(b.volume) || -Infinity) - (Number(a.volume) || -Infinity),
     liquidity: (a, b) => (Number(b.liquidity) || -Infinity) - (Number(a.liquidity) || -Infinity),
@@ -1747,13 +1913,13 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
     },
     recent: (a, b) => (toMillisUi(b.provider_ts) || 0) - (toMillisUi(a.provider_ts) || 0),
   };
-  const activeMarkets = allMarkets.filter((market) => market.status === 'active').slice().sort(sorters.volume);
-  const breakingFallback = activeMarkets.filter((market) => {
+  const allActiveMarkets = renderableMarkets.filter((market) => isPolymarketActiveStatus(market.status)).slice().sort(sorters.volume);
+  const breakingFallback = allActiveMarkets.filter((market) => {
     const text = `${market.title} ${(market.categories || []).join(' ')} ${market.rawCategory || ''}`.toLowerCase();
     return (market.categories || []).includes('breaking') || /(breaking|urgent|headline|flash|developing|war|ceasefire|meeting|tariff|fed|rate cut|diplomatic|summit)/.test(text);
   }).slice(0, 8);
-  const newFallback = activeMarkets.slice().sort(sorters.recent).slice(0, 12);
-  const trendingSlice = (polymarketState.slices.trending.length ? polymarketState.slices.trending : activeMarkets.slice(0, 24)).slice().sort(sorters.volume);
+  const newFallback = allActiveMarkets.slice().sort(sorters.recent).slice(0, 12);
+  const trendingSlice = (polymarketState.slices.trending.length ? polymarketState.slices.trending : allActiveMarkets.slice(0, 24)).slice().sort(sorters.volume);
   const breakingSlice = (polymarketState.slices.breaking.length ? polymarketState.slices.breaking : breakingFallback).slice().sort(sorters.volume);
   const newSlice = (polymarketState.slices.new.length ? polymarketState.slices.new : newFallback).slice().sort(sorters.recent);
   const selectedSlug = getSelectedPolymarketMarketSlug();
@@ -1762,16 +1928,17 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
   const activeSort = polymarketState.sort;
   const activeQuery = polymarketState.query;
   const activeView = polymarketState.view;
+  const activeBetType = polymarketState.betType;
 
   const tabButtons = Array.from(document.querySelectorAll('#polymarket-tabs .poly-tab'));
   const viewButtons = Array.from(document.querySelectorAll('#polymarket-view-nav .poly-view-tab'));
   const categoryCounts = {
-    all: allMarkets.length,
+    all: renderableMarkets.length,
     trending: trendingSlice.length,
     breaking: breakingSlice.length,
     new: newSlice.length,
   };
-  allMarkets.forEach((market) => {
+  categorizedMarkets.forEach((market) => {
     const categories = Array.isArray(market.categories) ? market.categories : [];
     categories.forEach((category) => {
       if (POLY_CATEGORIES.includes(category) && !['all', 'trending', 'breaking', 'new'].includes(category)) {
@@ -1788,24 +1955,36 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
     btn.classList.toggle('active', isActive);
     btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
   });
-  let baseFiltered;
-  if (activeCategory === 'trending') baseFiltered = trendingSlice.slice();
-  else if (activeCategory === 'breaking') baseFiltered = breakingSlice.slice();
-  else if (activeCategory === 'new') baseFiltered = newSlice.slice();
-  else if (activeCategory === 'all') baseFiltered = allMarkets.slice();
-  else baseFiltered = allMarkets.filter((market) => Array.isArray(market.categories) && market.categories.includes(activeCategory));
-  if (activeQuery) {
-    baseFiltered = baseFiltered.filter((market) => {
+  const categoryPools = {
+    all: renderableMarkets.slice(),
+    trending: trendingSlice.slice(),
+    breaking: breakingSlice.slice(),
+    new: newSlice.slice(),
+    politics: categorizedMarkets.filter((market) => Array.isArray(market.categories) && market.categories.includes('politics')),
+    crypto: categorizedMarkets.filter((market) => Array.isArray(market.categories) && market.categories.includes('crypto')),
+    finance: categorizedMarkets.filter((market) => Array.isArray(market.categories) && market.categories.includes('finance')),
+    geopolitics: categorizedMarkets.filter((market) => Array.isArray(market.categories) && market.categories.includes('geopolitics')),
+    oil: categorizedMarkets.filter((market) => Array.isArray(market.categories) && market.categories.includes('oil')),
+    xauusd: categorizedMarkets.filter((market) => Array.isArray(market.categories) && market.categories.includes('xauusd')),
+  };
+  const filterByQuery = (markets) => {
+    if (!activeQuery) return markets.slice();
+    return markets.filter((market) => {
       const haystack = `${market.title} ${market.category} ${(market.categories || []).join(' ')} ${market.status} ${market.marketType}`.toLowerCase();
       return haystack.includes(activeQuery);
     });
-  }
+  };
+  const filterByBetType = (markets) => {
+    if (!activeBetType || activeBetType === 'all') return markets.slice();
+    return markets.filter((market) => market.marketType === activeBetType);
+  };
+  const canonicalBaseMarkets = filterByBetType(filterByQuery(categoryPools[activeCategory] || categoryPools.all));
 
   const viewCounts = {
-    all: baseFiltered.length,
-    active: baseFiltered.filter((market) => market.status === 'active').length,
-    ending: baseFiltered.filter((market) => market.status === 'active' && Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0 && market.hoursUntil <= 72).length,
-    resolved: baseFiltered.filter((market) => market.status.includes('resolved') || market.status.includes('closed')).length,
+    all: canonicalBaseMarkets.length,
+    active: filterPolymarketByView(canonicalBaseMarkets, 'active').length,
+    ending: filterPolymarketByView(canonicalBaseMarkets, 'ending').length,
+    resolved: filterPolymarketByView(canonicalBaseMarkets, 'resolved').length,
   };
   viewButtons.forEach((btn) => {
     const view = String(btn.dataset.view || 'all').toLowerCase();
@@ -1817,32 +1996,24 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
     btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
   });
 
-  let filtered = baseFiltered.slice();
-  if (activeView === 'active') {
-    filtered = filtered.filter((market) => market.status === 'active');
-  } else if (activeView === 'ending') {
-    filtered = filtered.filter((market) => market.status === 'active' && Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0 && market.hoursUntil <= 72);
-  } else if (activeView === 'resolved') {
-    filtered = filtered.filter((market) => market.status.includes('resolved') || market.status.includes('closed'));
-  }
-  filtered.sort(sorters[activeSort] || sorters.volume);
-
-  const featuredMarket = filtered.find((market) => market.status === 'active')
-    || trendingSlice.find((market) => market.status === 'active')
-    || filtered[0]
-    || activeMarkets[0]
-    || allMarkets[0]
+  const visibleMarkets = filterPolymarketByView(canonicalBaseMarkets, activeView).slice().sort(sorters[activeSort] || sorters.volume);
+  const featuredMarket = visibleMarkets.find((market) => isPolymarketActiveStatus(market.status))
+    || canonicalBaseMarkets.find((market) => isPolymarketActiveStatus(market.status))
+    || visibleMarkets[0]
+    || canonicalBaseMarkets[0]
+    || allActiveMarkets[0]
+    || renderableMarkets[0]
     || null;
-  const spotlightSource = activeCategory === 'breaking'
-    ? breakingSlice
-    : activeCategory === 'new'
-      ? newSlice
-      : trendingSlice.length
-        ? trendingSlice
-        : filtered;
-  const spotlightMarkets = spotlightSource.filter((market) => !featuredMarket || market.market_slug !== featuredMarket.market_slug).slice(0, 4);
+  const spotlightSource = visibleMarkets.length
+    ? visibleMarkets
+    : canonicalBaseMarkets.length
+      ? canonicalBaseMarkets
+      : (activeCategory === 'breaking' ? breakingSlice : activeCategory === 'new' ? newSlice : trendingSlice);
+  const spotlightMarkets = spotlightSource
+    .filter((market) => !featuredMarket || market.market_slug !== featuredMarket.market_slug)
+    .slice(0, 4);
   const selectedMarket = selectedSlug
-    ? (allMarkets.find((market) => market.market_slug === selectedSlug)
+    ? (renderableMarkets.find((market) => market.market_slug === selectedSlug)
       || trendingSlice.find((market) => market.market_slug === selectedSlug)
       || breakingSlice.find((market) => market.market_slug === selectedSlug)
       || newSlice.find((market) => market.market_slug === selectedSlug)
@@ -1851,7 +2022,7 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
   const topicRows = POLY_CATEGORIES
     .filter((category) => !['all', 'trending', 'breaking', 'new'].includes(category))
     .map((category) => {
-      const rows = activeMarkets.filter((market) => Array.isArray(market.categories) && market.categories.includes(category));
+      const rows = allActiveMarkets.filter((market) => Array.isArray(market.categories) && market.categories.includes(category));
       return {
         category,
         label: POLY_LABELS[category] || category,
@@ -1920,21 +2091,21 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
     }
   }
 
-  setAnimatedContent(kpiCountEl, 'poly:kpi:count', String(filtered.length), { numericValue: filtered.length });
+  setAnimatedContent(kpiCountEl, 'poly:kpi:count', String(visibleMarkets.length), { numericValue: visibleMarkets.length });
   setAnimatedContent(
     kpiVolEl,
     'poly:kpi:volume',
-    formatCompactUsd(filtered.reduce((sum, market) => sum + (Number.isFinite(market.volume) ? market.volume : 0), 0)),
-    { numericValue: filtered.reduce((sum, market) => sum + (Number.isFinite(market.volume) ? market.volume : 0), 0) }
+    formatCompactUsd(visibleMarkets.reduce((sum, market) => sum + (Number.isFinite(market.volume) ? market.volume : 0), 0)),
+    { numericValue: visibleMarkets.reduce((sum, market) => sum + (Number.isFinite(market.volume) ? market.volume : 0), 0) }
   );
   setAnimatedContent(
     kpiEndingEl,
     'poly:kpi:ending',
-    String(filtered.filter((market) => Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0 && market.hoursUntil <= 48).length),
-    { numericValue: filtered.filter((market) => Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0 && market.hoursUntil <= 48).length }
+    String(visibleMarkets.filter((market) => isPolymarketActiveStatus(market.status) && Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0 && market.hoursUntil <= 48).length),
+    { numericValue: visibleMarkets.filter((market) => isPolymarketActiveStatus(market.status) && Number.isFinite(market.hoursUntil) && market.hoursUntil >= 0 && market.hoursUntil <= 48).length }
   );
   if (diagnosticsEl) {
-    diagnosticsEl.textContent = `${buildPolymarketFreshnessSummary(polymarketState.feedStatus)} | Loaded ${allMarkets.length} mapped markets | ${unmatchedCount} unmatched`;
+    diagnosticsEl.textContent = `${buildPolymarketFreshnessSummary(polymarketState.feedStatus)} | Loaded ${categorizedMarkets.length} mapped markets | ${unmatchedCount} unmatched`;
   }
 
   if (getDashboardMode() === 'polymarket') {
@@ -2118,7 +2289,7 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
   }
 
   if (!listEl) return;
-  if (!filtered.length) {
+  if (!visibleMarkets.length) {
     listEl.innerHTML = `
       <div class="empty-state">
         <div class="empty-state__title">No markets in this tab yet</div>
@@ -2126,7 +2297,7 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
       </div>
     `;
   } else {
-    const top = filtered.slice(0, Math.max(12, polymarketState.renderCount || 60));
+    const top = visibleMarkets.slice(0, Math.max(12, polymarketState.renderCount || 60));
     listEl.innerHTML = top.map((market) => {
       const leadCategory = (market.categories || []).find((category) => iconByCategory[category]) || market.category;
       const categoryIcon = iconByCategory[leadCategory] || 'Mk';
@@ -2627,7 +2798,6 @@ window.UI = {
   renderSignalHero,
   renderLevels,
   renderConditions,
-  renderDXY,
   renderNewsBanner,
   renderHistory,
   renderEvents,

@@ -34,6 +34,11 @@ const TOP_MARKETS_LIMIT = Number(Deno.env.get("POLYMARKET_TOP_MARKETS_LIMIT") ??
 const ACTIVE_MARKETS_LIMIT = Number(Deno.env.get("POLYMARKET_ACTIVE_MARKETS_LIMIT") ?? 600) || 600;
 const COMMODITIES_EVENTS_LIMIT = Number(Deno.env.get("POLYMARKET_COMMODITIES_EVENTS_LIMIT") ?? 240) || 240;
 const RECENT_MARKETS_LIMIT = Number(Deno.env.get("POLYMARKET_RECENT_MARKETS_LIMIT") ?? 120) || 120;
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+};
 const CATEGORY_PRIORITY: Record<string, number> = {
   xauusd: 80,
   oil: 75,
@@ -49,7 +54,7 @@ const CATEGORY_PRIORITY: Record<string, number> = {
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
   });
 }
 
@@ -256,6 +261,19 @@ async function fetchJson(path: string, params: Record<string, string>): Promise<
   }
 }
 
+async function fetchExactMarket(slug: string): Promise<PolymarketRow | null> {
+  const data = await fetchJson("/markets", {
+    slug,
+    limit: "3",
+    offset: "0",
+  });
+  if (!Array.isArray(data)) return null;
+  const normalized = data
+    .map((item) => normalizePolymarketRow(item as Record<string, unknown>, "detail"))
+    .filter((row): row is PolymarketRow => Boolean(row));
+  return normalized[0] ?? null;
+}
+
 async function fetchTopVolumeMarkets(): Promise<PolymarketRow[]> {
   const data = await fetchJson("/markets", {
     active: "true",
@@ -395,6 +413,61 @@ function buildBreakingRows(rows: PolymarketRow[]): PolymarketRow[] {
 }
 
 Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: CORS_HEADERS });
+  }
+
+  const url = new URL(req.url);
+
+  if (req.method === "GET") {
+    const detailSlug = String(url.searchParams.get("detail_slug") ?? url.searchParams.get("market_slug") ?? "").trim();
+
+    if (detailSlug) {
+      const market = await fetchExactMarket(detailSlug);
+      return jsonResponse({
+        ok: Boolean(market),
+        sourceMode: market ? "live" : "error",
+        sourceLabel: market ? "Supabase Edge proxy" : "Supabase Edge proxy unavailable",
+        fetchedAt: new Date().toISOString(),
+        error: market ? "" : "Market detail unavailable",
+        market,
+      }, market ? 200 : 404);
+    }
+
+    const [topRows, activeRows, recentRows, commodityRows] = await Promise.all([
+      fetchTopVolumeMarkets(),
+      fetchActiveMarkets(),
+      fetchRecentMarkets(),
+      fetchCommodityEventMarkets(),
+    ]);
+    const breakingRows = buildBreakingRows(activeRows);
+    const rows = mergeMarkets(topRows, activeRows, recentRows, commodityRows, breakingRows);
+
+    return jsonResponse({
+      ok: rows.length > 0,
+      liveOk: rows.length > 0,
+      fallbackUsed: false,
+      sourceMode: rows.length > 0 ? "live" : "error",
+      sourceLabel: rows.length > 0 ? "Supabase Edge proxy" : "Supabase Edge proxy unavailable",
+      fetchedAt: new Date().toISOString(),
+      error: rows.length > 0 ? "" : "No live proxy rows available",
+      markets: rows,
+      slices: {
+        trending: topRows,
+        breaking: breakingRows,
+        new: recentRows,
+      },
+      diagnostics: {
+        markets_fetched: rows.length,
+        top_markets: topRows.length,
+        active_markets: activeRows.length,
+        recent_markets: recentRows.length,
+        commodity_markets: commodityRows.length,
+        breaking_markets: breakingRows.length,
+      },
+    });
+  }
+
   if (req.method !== "POST") {
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
