@@ -247,6 +247,12 @@
                 </div>
               </section>
             </div>
+
+            <section class="poly-home-hero__intro" aria-labelledby="polymarket-workspace-title">
+              <span class="poly-home-hero__eyebrow">Market workspace</span>
+              <h2 class="poly-home-hero__title" id="polymarket-workspace-title">Search, filter, and open live contracts without the dashboard clutter.</h2>
+              <p class="poly-home-hero__copy">Use the left rail for attention signals, then move into the featured market and active cards below.</p>
+            </section>
           </div>
 
           <div class="poly-toolbar">
@@ -262,21 +268,6 @@
                 <option value="probability">Probability</option>
               </select>
             </label>
-            <div class="poly-toolbar__summary" aria-live="polite">
-              <div class="poly-toolbar__summary-item">
-                <span class="poly-toolbar__summary-label">BTC Spot</span>
-                <strong class="polymarket-btc__price" id="polymarket-btc-price">$--</strong>
-              </div>
-              <div class="poly-toolbar__summary-item">
-                <span class="poly-toolbar__summary-label">24h</span>
-                <span class="polymarket-btc__change" id="polymarket-btc-change">Waiting for feed...</span>
-              </div>
-              <div class="poly-toolbar__summary-item">
-                <span class="poly-toolbar__summary-label">Freshness</span>
-                <span class="signal-hero__time" id="polymarket-last-sync">Last sync: --</span>
-              </div>
-              <span class="poly-live-pill" id="polymarket-live-pill">Waiting for feed</span>
-            </div>
           </div>
 
           <div class="feature-note poly-diagnostics" id="polymarket-diagnostics">Loaded -- mapped markets | -- unmatched</div>
@@ -334,6 +325,20 @@
               <div class="poly-detail-sheet__body" id="polymarket-detail-body">
                 <div class="feature-note">Choose a market card to inspect its detail.</div>
               </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="page page--polymarket-detail" id="page-polymarket-detail" aria-live="polite">
+          <div class="poly-detail-page">
+            <div class="poly-detail-page__head">
+              <button type="button" class="poly-detail-page__action" id="polymarket-detail-page-back">Back</button>
+              <div class="poly-detail-page__eyebrow">Market detail</div>
+              <button type="button" class="poly-detail-page__action" id="polymarket-detail-page-close">Close</button>
+            </div>
+            <h2 class="poly-detail-page__title" id="polymarket-detail-page-title">Loading market...</h2>
+            <div class="poly-detail-page__body" id="polymarket-detail-page-body">
+              <div class="feature-note">Choose a market card to inspect its detail.</div>
             </div>
           </div>
         </section>

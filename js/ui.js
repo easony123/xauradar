@@ -57,9 +57,17 @@ const POLY_LABELS = {
   geopolitics: 'Geopolitics',
   xauusd: 'XAUUSD',
 };
+const POLY_MARKET_TYPE_LABELS = {
+  all: 'General',
+  up_down: 'Up / Down',
+  above_below: 'Above / Below',
+  price_range: 'Price Range',
+  hit_price: 'Hit Price',
+};
 
 let googleTranslateLoader = null;
 const animatedValueState = new Map();
+let polymarketListScrollTop = 0;
 
 function getSelectedSignalLane() {
   return String(localStorage.getItem(SIGNAL_LANE_KEY) || 'intraday').toLowerCase() === 'swing' ? 'swing' : 'intraday';
@@ -196,6 +204,60 @@ function setPolymarketMarketHistory(slug, rows = []) {
   polymarketState.historyBySlug[key] = Array.isArray(rows) ? rows.slice() : [];
 }
 
+function isPhoneDetailMode() {
+  return Boolean(window.matchMedia && window.matchMedia('(max-width: 767px)').matches);
+}
+
+function rememberPolymarketListScroll() {
+  const listPage = document.getElementById('page-polymarket');
+  if (!listPage) return;
+  polymarketListScrollTop = Math.max(0, Number(listPage.scrollTop) || 0);
+}
+
+function restorePolymarketListScroll() {
+  const listPage = document.getElementById('page-polymarket');
+  if (!listPage) return;
+  const nextTop = Math.max(0, Number(polymarketListScrollTop) || 0);
+  window.requestAnimationFrame(() => {
+    listPage.scrollTop = nextTop;
+  });
+}
+
+function openPolymarketDetail(slug) {
+  const normalized = setSelectedPolymarketMarketSlug(slug);
+  if (!normalized) return;
+  if (isPhoneDetailMode()) {
+    rememberPolymarketListScroll();
+    setActivePage('polymarket-detail', { force: true });
+  }
+  renderPolymarketDashboard();
+}
+
+function closePolymarketDetail(options = {}) {
+  const restoreScroll = options.restoreScroll !== false;
+  const hadSelection = Boolean(getSelectedPolymarketMarketSlug());
+  setSelectedPolymarketMarketSlug('', false);
+
+  const detailBackdrop = document.getElementById('polymarket-detail-backdrop');
+  const detailSheet = document.getElementById('polymarket-detail-sheet');
+  if (detailBackdrop) detailBackdrop.hidden = true;
+  if (detailSheet) {
+    detailSheet.hidden = true;
+    detailSheet.setAttribute('aria-hidden', 'true');
+  }
+  document.body.classList.remove('poly-detail-open', 'poly-mobile-detail-open');
+
+  const detailPageActive = document.getElementById('page-polymarket-detail')?.classList.contains('active');
+  if (isPhoneDetailMode() || detailPageActive) {
+    setActivePage('polymarket', { force: true });
+    if (restoreScroll) restorePolymarketListScroll();
+  }
+
+  if (hadSelection || detailPageActive) {
+    renderPolymarketDashboard();
+  }
+}
+
 function toXauPips(priceDelta) {
   const delta = Number(priceDelta);
   if (!Number.isFinite(delta)) return NaN;
@@ -228,6 +290,34 @@ function formatMalaysiaTime(value, useShort = false) {
   if (Number.isNaN(date.getTime())) return '';
   const fmt = useShort ? MY_SHORT_TIME_FMT : MY_FULL_TIME_FMT;
   return `${fmt.format(date)} ${APP_TZ_LABEL}`;
+}
+
+function formatTimeAgo(value) {
+  if (!value) return '--';
+  const date = value instanceof Date ? value : new Date(value);
+  const ts = date.getTime();
+  if (!Number.isFinite(ts)) return '--';
+
+  const deltaMs = Date.now() - ts;
+  const isFuture = deltaMs < 0;
+  const absMs = Math.abs(deltaMs);
+
+  if (absMs < 45000) {
+    return isFuture ? 'soon' : 'just now';
+  }
+
+  const minutes = Math.round(absMs / 60000);
+  if (minutes < 60) {
+    return `${minutes}m ${isFuture ? 'from now' : 'ago'}`;
+  }
+
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ${isFuture ? 'from now' : 'ago'}`;
+  }
+
+  const days = Math.round(hours / 24);
+  return `${days}d ${isFuture ? 'from now' : 'ago'}`;
 }
 
 function getTimePartsInTimezone(date, timezone) {
@@ -278,10 +368,11 @@ function initTheme() {
 
 function setActivePage(target, opts = {}) {
   const force = Boolean(opts.force);
-  if (activeDashboardMode === 'polymarket' && target !== 'polymarket' && !force) {
+  const isPolymarketPage = target === 'polymarket' || target === 'polymarket-detail';
+  if (activeDashboardMode === 'polymarket' && !isPolymarketPage && !force) {
     target = 'polymarket';
   }
-  if (target !== 'polymarket') {
+  if (!isPolymarketPage) {
     lastXauPage = target;
   }
 
@@ -362,6 +453,56 @@ function buildPolymarketFreshnessSummary(feedStatus = {}) {
   }
 
   return sourceLabel || 'Waiting for live feed';
+}
+
+function renderPolymarketRenderFailure(error, context = 'render') {
+  const message = String(error?.message || error || 'Unknown render error').trim() || 'Unknown render error';
+  console.error(`Polymarket ${context} error:`, error);
+
+  const diagnosticsEl = document.getElementById('polymarket-diagnostics');
+  const featuredEl = document.getElementById('polymarket-featured-market');
+  const listEl = document.getElementById('polymarket-markets-list');
+  const breakingEl = document.getElementById('polymarket-breaking-list');
+  const hotTopicsEl = document.getElementById('polymarket-hot-topics');
+  const spotlightEl = document.getElementById('polymarket-spotlight-strip');
+  const detailBackdrop = document.getElementById('polymarket-detail-backdrop');
+  const detailSheet = document.getElementById('polymarket-detail-sheet');
+  const detailTitleEl = document.getElementById('polymarket-detail-title');
+  const detailBodyEl = document.getElementById('polymarket-detail-body');
+  const detailPageTitleEl = document.getElementById('polymarket-detail-page-title');
+  const detailPageBodyEl = document.getElementById('polymarket-detail-page-body');
+
+  if (diagnosticsEl) {
+    diagnosticsEl.textContent = `Polymarket render issue (${context}): ${message}`;
+  }
+
+  const fallbackMarkup = `
+    <div class="empty-state">
+      <div class="empty-state__title">Polymarket refresh hit a render issue</div>
+      <div class="empty-state__sub">The dashboard will retry automatically. Latest error: ${escapeHtml(message)}</div>
+    </div>
+  `;
+
+  if (featuredEl) featuredEl.innerHTML = fallbackMarkup;
+  if (listEl) listEl.innerHTML = fallbackMarkup;
+  if (breakingEl) breakingEl.innerHTML = '<div class="feature-note">Breaking markets are temporarily unavailable while the page recovers.</div>';
+  if (hotTopicsEl) hotTopicsEl.innerHTML = '<div class="feature-note">Topics will return after the next successful refresh.</div>';
+  if (spotlightEl) spotlightEl.innerHTML = '<div class="feature-note">Spotlight markets will return after the next successful refresh.</div>';
+
+  if (detailBackdrop) detailBackdrop.hidden = true;
+  if (detailSheet) {
+    detailSheet.hidden = true;
+    detailSheet.setAttribute('aria-hidden', 'true');
+  }
+  if (detailTitleEl) detailTitleEl.textContent = 'Polymarket detail unavailable';
+  if (detailBodyEl) {
+    detailBodyEl.innerHTML = '<div class="feature-note">Details will reappear after the next successful market render.</div>';
+  }
+  if (detailPageTitleEl) detailPageTitleEl.textContent = 'Polymarket detail unavailable';
+  if (detailPageBodyEl) {
+    detailPageBodyEl.innerHTML = '<div class="feature-note">Details will reappear after the next successful market render.</div>';
+  }
+  document.body.classList.remove('poly-detail-open', 'poly-mobile-detail-open');
 }
 
 function updateDashboardTopbar(mode) {
@@ -659,6 +800,8 @@ function initPolymarketControls() {
   const sortSelect = document.getElementById('polymarket-sort');
   const detailClose = document.getElementById('polymarket-detail-close');
   const detailBackdrop = document.getElementById('polymarket-detail-backdrop');
+  const detailPageBack = document.getElementById('polymarket-detail-page-back');
+  const detailPageClose = document.getElementById('polymarket-detail-page-close');
 
   const savedCategory = localStorage.getItem(POLY_CATEGORY_KEY);
   const savedSort = localStorage.getItem(POLY_SORT_KEY);
@@ -722,18 +865,22 @@ function initPolymarketControls() {
 
   if (detailClose && !detailClose.dataset.bound) {
     detailClose.dataset.bound = '1';
-    detailClose.addEventListener('click', () => {
-      setSelectedPolymarketMarketSlug('', false);
-      renderPolymarketDashboard();
-    });
+    detailClose.addEventListener('click', () => closePolymarketDetail());
   }
 
   if (detailBackdrop && !detailBackdrop.dataset.bound) {
     detailBackdrop.dataset.bound = '1';
-    detailBackdrop.addEventListener('click', () => {
-      setSelectedPolymarketMarketSlug('', false);
-      renderPolymarketDashboard();
-    });
+    detailBackdrop.addEventListener('click', () => closePolymarketDetail());
+  }
+
+  if (detailPageBack && !detailPageBack.dataset.bound) {
+    detailPageBack.dataset.bound = '1';
+    detailPageBack.addEventListener('click', () => closePolymarketDetail());
+  }
+
+  if (detailPageClose && !detailPageClose.dataset.bound) {
+    detailPageClose.dataset.bound = '1';
+    detailPageClose.addEventListener('click', () => closePolymarketDetail());
   }
 
   if (!window.__polyDetailEscBound) {
@@ -741,8 +888,8 @@ function initPolymarketControls() {
     window.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape') return;
       if (!getSelectedPolymarketMarketSlug()) return;
-      setSelectedPolymarketMarketSlug('', false);
-      renderPolymarketDashboard();
+      if (isPhoneDetailMode()) return;
+      closePolymarketDetail();
     });
   }
 
@@ -1841,56 +1988,57 @@ function buildPolymarketHistoryChartMarkup(historyRows = [], market = null) {
 }
 
 function renderPolymarketDashboard(btcTick, feedOrMarkets) {
-  if (btcTick !== undefined) {
-    polymarketState.btcTick = btcTick || null;
-  }
-  if (feedOrMarkets !== undefined) {
-    if (Array.isArray(feedOrMarkets)) {
-      const nextMarkets = feedOrMarkets.map(normalizePolymarketRow).filter(Boolean);
-      if (nextMarkets.length || !Array.isArray(polymarketState.markets) || !polymarketState.markets.length) {
-        polymarketState.markets = nextMarkets;
-      }
-      polymarketState.fallbackMarkets = nextMarkets;
-      if (!polymarketState.slices || typeof polymarketState.slices !== 'object') {
-        polymarketState.slices = { trending: [], breaking: [], new: [] };
-      }
-      polymarketState.feedStatus = {
-        ...polymarketState.feedStatus,
-        sourceMode: 'fallback',
-        sourceLabel: 'Supabase cache',
-      };
-    } else if (feedOrMarkets && typeof feedOrMarkets === 'object') {
-      const feed = feedOrMarkets;
-      const nextMarkets = Array.isArray(feed.markets) ? feed.markets.map(normalizePolymarketRow).filter(Boolean) : [];
-      const previousSlices = polymarketState.slices && typeof polymarketState.slices === 'object'
-        ? polymarketState.slices
-        : { trending: [], breaking: [], new: [] };
-      const nextSlices = {
-        trending: Array.isArray(feed.slices?.trending) ? feed.slices.trending.map(normalizePolymarketRow).filter(Boolean) : [],
-        breaking: Array.isArray(feed.slices?.breaking) ? feed.slices.breaking.map(normalizePolymarketRow).filter(Boolean) : [],
-        new: Array.isArray(feed.slices?.new) ? feed.slices.new.map(normalizePolymarketRow).filter(Boolean) : [],
-      };
-      polymarketState.fallbackMarkets = Array.isArray(feed.fallbackMarkets)
-        ? feed.fallbackMarkets.map(normalizePolymarketRow).filter(Boolean)
-        : (polymarketState.fallbackMarkets || []);
-      if (nextMarkets.length || !Array.isArray(polymarketState.markets) || !polymarketState.markets.length) {
-        polymarketState.markets = nextMarkets;
-      }
-      polymarketState.slices = {
-        trending: nextSlices.trending.length ? nextSlices.trending : (previousSlices.trending || []),
-        breaking: nextSlices.breaking.length ? nextSlices.breaking : (previousSlices.breaking || []),
-        new: nextSlices.new.length ? nextSlices.new : (previousSlices.new || []),
-      };
-      polymarketState.feedStatus = {
-        liveOk: Boolean(feed.liveOk),
-        fallbackUsed: Boolean(feed.fallbackUsed),
-        sourceMode: String(feed.sourceMode || 'idle'),
-        sourceLabel: String(feed.sourceLabel || 'Waiting for live feed'),
-        fetchedAt: feed.fetchedAt || null,
-        error: String(feed.error || ''),
-      };
+  try {
+    if (btcTick !== undefined) {
+      polymarketState.btcTick = btcTick || null;
     }
-  }
+    if (feedOrMarkets !== undefined) {
+      if (Array.isArray(feedOrMarkets)) {
+        const nextMarkets = feedOrMarkets.map(normalizePolymarketRow).filter(Boolean);
+        if (nextMarkets.length || !Array.isArray(polymarketState.markets) || !polymarketState.markets.length) {
+          polymarketState.markets = nextMarkets;
+        }
+        polymarketState.fallbackMarkets = nextMarkets;
+        if (!polymarketState.slices || typeof polymarketState.slices !== 'object') {
+          polymarketState.slices = { trending: [], breaking: [], new: [] };
+        }
+        polymarketState.feedStatus = {
+          ...polymarketState.feedStatus,
+          sourceMode: 'fallback',
+          sourceLabel: 'Supabase cache',
+        };
+      } else if (feedOrMarkets && typeof feedOrMarkets === 'object') {
+        const feed = feedOrMarkets;
+        const nextMarkets = Array.isArray(feed.markets) ? feed.markets.map(normalizePolymarketRow).filter(Boolean) : [];
+        const previousSlices = polymarketState.slices && typeof polymarketState.slices === 'object'
+          ? polymarketState.slices
+          : { trending: [], breaking: [], new: [] };
+        const nextSlices = {
+          trending: Array.isArray(feed.slices?.trending) ? feed.slices.trending.map(normalizePolymarketRow).filter(Boolean) : [],
+          breaking: Array.isArray(feed.slices?.breaking) ? feed.slices.breaking.map(normalizePolymarketRow).filter(Boolean) : [],
+          new: Array.isArray(feed.slices?.new) ? feed.slices.new.map(normalizePolymarketRow).filter(Boolean) : [],
+        };
+        polymarketState.fallbackMarkets = Array.isArray(feed.fallbackMarkets)
+          ? feed.fallbackMarkets.map(normalizePolymarketRow).filter(Boolean)
+          : (polymarketState.fallbackMarkets || []);
+        if (nextMarkets.length || !Array.isArray(polymarketState.markets) || !polymarketState.markets.length) {
+          polymarketState.markets = nextMarkets;
+        }
+        polymarketState.slices = {
+          trending: nextSlices.trending.length ? nextSlices.trending : (previousSlices.trending || []),
+          breaking: nextSlices.breaking.length ? nextSlices.breaking : (previousSlices.breaking || []),
+          new: nextSlices.new.length ? nextSlices.new : (previousSlices.new || []),
+        };
+        polymarketState.feedStatus = {
+          liveOk: Boolean(feed.liveOk),
+          fallbackUsed: Boolean(feed.fallbackUsed),
+          sourceMode: String(feed.sourceMode || 'idle'),
+          sourceLabel: String(feed.sourceLabel || 'Waiting for live feed'),
+          fetchedAt: feed.fetchedAt || null,
+          error: String(feed.error || ''),
+        };
+      }
+    }
 
   const activeBtc = polymarketState.btcTick;
   const rawMarkets = Array.isArray(polymarketState.markets) ? polymarketState.markets : [];
@@ -2051,6 +2199,9 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
   const detailSheet = document.getElementById('polymarket-detail-sheet');
   const detailTitleEl = document.getElementById('polymarket-detail-title');
   const detailBodyEl = document.getElementById('polymarket-detail-body');
+  const detailPageEl = document.getElementById('page-polymarket-detail');
+  const detailPageTitleEl = document.getElementById('polymarket-detail-page-title');
+  const detailPageBodyEl = document.getElementById('polymarket-detail-page-body');
 
   if (btcPriceEl) {
     if (!activeBtc || !Number.isFinite(Number(activeBtc.price))) {
@@ -2150,13 +2301,6 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
     geopolitics: 'Ge',
     xauusd: 'Au',
   };
-  const typeLabelMap = {
-    all: 'General',
-    up_down: 'Up / Down',
-    above_below: 'Above / Below',
-    price_range: 'Price Range',
-    hit_price: 'Hit Price',
-  };
   const buildMarketTriggerAttr = (market) => `data-poly-open-market="${escapeHtml(market.market_slug)}"`;
   const buildProbabilityCells = (market, keyPrefix, size = 'default') => {
     const yesPctText = Number.isFinite(market.yesPct) ? `${market.yesPct.toFixed(size === 'featured' ? 0 : 1)}%` : '--';
@@ -2173,6 +2317,71 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
       yesValueMarkup: buildAnimatedInlineMarkup(`${keyPrefix}:yes-value`, yesText, market.yesPct, 'span', size === 'featured' ? 'poly-featured-odd__value' : 'poly-odd__value'),
       noValueMarkup: buildAnimatedInlineMarkup(`${keyPrefix}:no-value`, noText, market.noPct, 'span', size === 'featured' ? 'poly-featured-odd__value' : 'poly-odd__value'),
     };
+  };
+  const buildPolymarketDetailBodyMarkup = (market) => {
+    if (!market) {
+      return '<div class="feature-note">Choose a market card to inspect its detail.</div>';
+    }
+    const categoryLine = (market.categories || [])
+      .filter((category) => category !== 'all')
+      .map((category) => POLY_LABELS[category] || category)
+      .join(' • ');
+    const historyRows = polymarketState.historyBySlug[market.market_slug] || [];
+    const detailOdds = buildProbabilityCells(market, `poly:detail:${market.market_slug}`, 'featured');
+    return `
+      <section class="poly-detail-section">
+        <div class="poly-detail-badges">
+          <span class="polymarket-card__status ${getPolymarketStatusClass(market)}">${getPolymarketStatusText(market)}</span>
+          <span class="poly-detail-chip">${escapeHtml(categoryLine || getPolymarketCategoryLabel(market))}</span>
+          <span class="poly-detail-chip">${escapeHtml(POLY_MARKET_TYPE_LABELS[market.marketType] || 'General')}</span>
+          <span class="poly-detail-chip">${escapeHtml(getPolymarketEndText(market))}</span>
+        </div>
+        <div class="poly-detail-odds">
+          <div class="poly-featured-odd poly-featured-odd--yes">
+            <span class="poly-featured-odd__name">Yes</span>
+            ${detailOdds.yesPctMarkup}
+            ${detailOdds.yesValueMarkup}
+          </div>
+          <div class="poly-featured-odd poly-featured-odd--no">
+            <span class="poly-featured-odd__name">No</span>
+            ${detailOdds.noPctMarkup}
+            ${detailOdds.noValueMarkup}
+          </div>
+        </div>
+      </section>
+      <section class="poly-detail-section poly-detail-grid">
+        <div class="poly-detail-stat">
+          <span class="poly-detail-stat__label">Volume</span>
+          <strong>${formatCompactUsd(market.volume)}</strong>
+        </div>
+        <div class="poly-detail-stat">
+          <span class="poly-detail-stat__label">Liquidity</span>
+          <strong>${formatCompactUsd(market.liquidity)}</strong>
+        </div>
+        <div class="poly-detail-stat">
+          <span class="poly-detail-stat__label">Last sync</span>
+          <strong>${escapeHtml(formatMalaysiaTime(market.provider_ts || polymarketState.feedStatus.fetchedAt, true) || '--')}</strong>
+        </div>
+        <div class="poly-detail-stat">
+          <span class="poly-detail-stat__label">Source</span>
+          <strong>${escapeHtml(polymarketState.feedStatus.sourceLabel || 'Live Gamma')}</strong>
+        </div>
+      </section>
+      <section class="poly-detail-section">
+        <div class="poly-detail-section__title">Probability history</div>
+        ${buildPolymarketHistoryChartMarkup(historyRows, market)}
+      </section>
+      <section class="poly-detail-section poly-detail-grid">
+        <div class="poly-detail-stat">
+          <span class="poly-detail-stat__label">Market slug</span>
+          <strong>${escapeHtml(market.market_slug)}</strong>
+        </div>
+        <div class="poly-detail-stat">
+          <span class="poly-detail-stat__label">Display freshness</span>
+          <strong>${escapeHtml(buildPolymarketFreshnessSummary(polymarketState.feedStatus))}</strong>
+        </div>
+      </section>
+    `;
   };
 
   if (breakingEl) {
@@ -2301,7 +2510,7 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
     listEl.innerHTML = top.map((market) => {
       const leadCategory = (market.categories || []).find((category) => iconByCategory[category]) || market.category;
       const categoryIcon = iconByCategory[leadCategory] || 'Mk';
-      const typeLabel = typeLabelMap[market.marketType] || 'General';
+      const typeLabel = POLY_MARKET_TYPE_LABELS[market.marketType] || 'General';
       const probWidth = Number.isFinite(market.yesPct) ? Math.max(2, Math.min(98, market.yesPct)) : 50;
       const odds = buildProbabilityCells(market, `poly:grid:${market.market_slug}`);
       return `
@@ -2354,8 +2563,7 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
     const openMarket = () => {
       const slug = String(node.getAttribute('data-poly-open-market') || '').trim();
       if (!slug) return;
-      setSelectedPolymarketMarketSlug(slug);
-      renderPolymarketDashboard();
+      openPolymarketDetail(slug);
     };
     node.addEventListener('click', openMarket);
     node.addEventListener('keydown', (event) => {
@@ -2366,77 +2574,53 @@ function renderPolymarketDashboard(btcTick, feedOrMarkets) {
     });
   });
 
-  if (detailBackdrop && detailSheet && detailTitleEl && detailBodyEl) {
-    const shouldOpen = Boolean(selectedMarket);
-    detailBackdrop.hidden = !shouldOpen;
-    detailSheet.hidden = !shouldOpen;
-    detailSheet.setAttribute('aria-hidden', shouldOpen ? 'false' : 'true');
-    document.body.classList.toggle('poly-detail-open', shouldOpen);
+  const shouldOpenDetail = Boolean(selectedMarket);
+  const phoneDetailMode = isPhoneDetailMode();
+  const desktopDetailOpen = shouldOpenDetail && !phoneDetailMode;
+  const mobileDetailOpen = shouldOpenDetail && phoneDetailMode;
 
-    if (shouldOpen && selectedMarket) {
-      const categoryLine = (selectedMarket.categories || [])
-        .filter((category) => category !== 'all')
-        .map((category) => POLY_LABELS[category] || category)
-        .join(' • ');
-      const historyRows = polymarketState.historyBySlug[selectedMarket.market_slug] || [];
-      const detailOdds = buildProbabilityCells(selectedMarket, `poly:detail:${selectedMarket.market_slug}`, 'featured');
-      detailTitleEl.textContent = selectedMarket.title;
-      detailBodyEl.innerHTML = `
-        <section class="poly-detail-section">
-          <div class="poly-detail-badges">
-            <span class="polymarket-card__status ${getPolymarketStatusClass(selectedMarket)}">${getPolymarketStatusText(selectedMarket)}</span>
-            <span class="poly-detail-chip">${escapeHtml(categoryLine || getPolymarketCategoryLabel(selectedMarket))}</span>
-            <span class="poly-detail-chip">${escapeHtml(typeLabelMap[selectedMarket.marketType] || 'General')}</span>
-            <span class="poly-detail-chip">${escapeHtml(getPolymarketEndText(selectedMarket))}</span>
-          </div>
-          <div class="poly-detail-odds">
-            <div class="poly-featured-odd poly-featured-odd--yes">
-              <span class="poly-featured-odd__name">Yes</span>
-              ${detailOdds.yesPctMarkup}
-              ${detailOdds.yesValueMarkup}
-            </div>
-            <div class="poly-featured-odd poly-featured-odd--no">
-              <span class="poly-featured-odd__name">No</span>
-              ${detailOdds.noPctMarkup}
-              ${detailOdds.noValueMarkup}
-            </div>
-          </div>
-        </section>
-        <section class="poly-detail-section poly-detail-grid">
-          <div class="poly-detail-stat">
-            <span class="poly-detail-stat__label">Volume</span>
-            <strong>${formatCompactUsd(selectedMarket.volume)}</strong>
-          </div>
-          <div class="poly-detail-stat">
-            <span class="poly-detail-stat__label">Liquidity</span>
-            <strong>${formatCompactUsd(selectedMarket.liquidity)}</strong>
-          </div>
-          <div class="poly-detail-stat">
-            <span class="poly-detail-stat__label">Last sync</span>
-            <strong>${escapeHtml(formatMalaysiaTime(selectedMarket.provider_ts || polymarketState.feedStatus.fetchedAt, true) || '--')}</strong>
-          </div>
-          <div class="poly-detail-stat">
-            <span class="poly-detail-stat__label">Source</span>
-            <strong>${escapeHtml(polymarketState.feedStatus.sourceLabel || 'Live Gamma')}</strong>
-          </div>
-        </section>
-        <section class="poly-detail-section">
-          <div class="poly-detail-section__title">Probability history</div>
-          ${buildPolymarketHistoryChartMarkup(historyRows, selectedMarket)}
-        </section>
-        <section class="poly-detail-section poly-detail-grid">
-          <div class="poly-detail-stat">
-            <span class="poly-detail-stat__label">Market slug</span>
-            <strong>${escapeHtml(selectedMarket.market_slug)}</strong>
-          </div>
-          <div class="poly-detail-stat">
-            <span class="poly-detail-stat__label">Display freshness</span>
-            <strong>${escapeHtml(buildPolymarketFreshnessSummary(polymarketState.feedStatus))}</strong>
-          </div>
-        </section>
-      `;
+  if (detailBackdrop) detailBackdrop.hidden = !desktopDetailOpen;
+  if (detailSheet) {
+    detailSheet.hidden = !desktopDetailOpen;
+    detailSheet.setAttribute('aria-hidden', desktopDetailOpen ? 'false' : 'true');
+  }
+  document.body.classList.toggle('poly-detail-open', desktopDetailOpen);
+  document.body.classList.toggle('poly-mobile-detail-open', mobileDetailOpen);
+
+  if (shouldOpenDetail && selectedMarket) {
+    const detailMarkup = buildPolymarketDetailBodyMarkup(selectedMarket);
+
+    if (detailTitleEl) detailTitleEl.textContent = selectedMarket.title;
+    if (detailBodyEl) {
+      detailBodyEl.innerHTML = detailMarkup;
       applyAnimatedValues(detailBodyEl);
     }
+    if (detailPageTitleEl) detailPageTitleEl.textContent = selectedMarket.title;
+    if (detailPageBodyEl) {
+      detailPageBodyEl.innerHTML = detailMarkup;
+      applyAnimatedValues(detailPageBodyEl);
+    }
+
+    if (phoneDetailMode) {
+      if (!detailPageEl?.classList.contains('active')) {
+        setActivePage('polymarket-detail', { force: true });
+      }
+    } else if (detailPageEl?.classList.contains('active')) {
+      setActivePage('polymarket', { force: true });
+    }
+  } else {
+    if (detailTitleEl) detailTitleEl.textContent = 'Loading market...';
+    if (detailBodyEl) detailBodyEl.innerHTML = '<div class="feature-note">Choose a market card to inspect its detail.</div>';
+    if (detailPageTitleEl) detailPageTitleEl.textContent = 'Loading market...';
+    if (detailPageBodyEl) detailPageBodyEl.innerHTML = '<div class="feature-note">Choose a market card to inspect its detail.</div>';
+
+    if (detailPageEl?.classList.contains('active')) {
+      setActivePage('polymarket', { force: true });
+      restorePolymarketListScroll();
+    }
+  }
+  } catch (error) {
+    renderPolymarketRenderFailure(error, 'dashboard');
   }
 }
 function renderStats(stats) {
@@ -2802,6 +2986,7 @@ window.UI = {
   renderHistory,
   renderEvents,
   renderPolymarketDashboard,
+  renderPolymarketRenderFailure,
   renderStats,
   initDemoControls,
   renderDemoDashboard,
