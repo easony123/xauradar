@@ -373,7 +373,7 @@
                   <input type="checkbox" id="demo-auto-toggle" checked>
                   <span>Auto Trade</span>
                 </label>
-                <button type="button" class="demo-reset-btn" id="demo-reset-btn">Reset Demo Account</button>
+                <button type="button" class="demo-reset-btn" id="demo-reset-btn">Reset Live State</button>
               </div>
               <div class="feature-note" id="demo-control-status">Auto-trade follows ACTIVE signals.</div>
 
@@ -450,8 +450,8 @@
                   <div class="stat-tile__value">0</div>
                 </div>
                 <div class="stat-tile">
-                  <div class="stat-tile__label">Total Pips</div>
-                  <div class="stat-tile__value">0</div>
+                  <div class="stat-tile__label">Execution</div>
+                  <div class="stat-tile__value">0W / 0L</div>
                 </div>
               </div>
             </div>
@@ -473,7 +473,7 @@
           <div class="card mt-12">
             <div class="card__header"><span class="card__title">Risk Calculator</span></div>
             <div class="card__body">
-              <div class="feature-note">Beginner note: position size = (equity x risk%) / stop distance.</div>
+              <div class="feature-note">Beginner note: preview P/L from lot size and pip change, then compare it with the advised lot size from the live signal stop distance.</div>
               <div class="risk-grid" id="risk-calc-body">
                 <div class="risk-input">
                   <label for="lot-input">Lot Size</label>
@@ -484,26 +484,19 @@
                   <input type="number" id="equity-input" value="10000" step="100" min="100">
                 </div>
                 <div class="risk-input">
-                  <label for="risk-percent-input">Risk %</label>
-                  <input type="number" id="risk-percent-input" value="0.50" step="0.05" min="0.10">
-                </div>
-                <div class="risk-input">
-                  <label for="lane-risk-select">Lane Preset</label>
-                  <select id="lane-risk-select">
-                    <option value="intraday">Intraday (0.50%)</option>
-                    <option value="swing">Swing (0.75%)</option>
-                  </select>
+                  <label for="pip-change-input">Change (Pips)</label>
+                  <input type="number" id="pip-change-input" value="10" step="0.1">
                 </div>
                 <div class="risk-val">
-                  <div class="risk-val__label">Position Size</div>
-                  <div class="risk-val__num" id="position-size-value">--</div>
+                  <div class="risk-val__label">P/L</div>
+                  <div class="risk-val__num text-muted" id="pl-preview-value">--</div>
                 </div>
-                <div class="risk-val"><div class="risk-val__label">Risk</div><div class="risk-val__num text-muted">--</div></div>
-                <div class="risk-val"><div class="risk-val__label">TP1</div><div class="risk-val__num text-muted">--</div></div>
-                <div class="risk-val"><div class="risk-val__label">TP2</div><div class="risk-val__num text-muted">--</div></div>
-                <div class="risk-val"><div class="risk-val__label">TP3</div><div class="risk-val__num text-muted">--</div></div>
+                <div class="risk-val">
+                  <div class="risk-val__label">Advised Lot Size</div>
+                  <div class="risk-val__num text-muted" id="advised-lot-value">--</div>
+                </div>
               </div>
-              <div class="feature-note" id="risk-guard-note">Daily risk state unavailable</div>
+              <div class="feature-note" id="risk-guard-note">Advice appears when a tradable signal is live.</div>
             </div>
           </div>
 

@@ -26,11 +26,13 @@ let lastPolymarketHistoryFetch = { slug: '', ts: 0 };
 let lastSignalHistory = [];
 let lastIndicatorSnapshot = null;
 let lastRiskState = null;
+let lastDemoPerformance = null;
 let polymarketPollInFlight = false;
 window._lastPriceDirection = null;
 window.__currentSignal = null;
 const XAU_MARKET_REOPEN_SUNDAY_UTC_HOUR = 22;
 const XAU_MARKET_CLOSE_FRIDAY_UTC_HOUR = 22;
+const APP_XAU_PIP_SIZE = 0.1;
 
 function hasUsablePolymarketFeed(feed) {
   return Boolean(feed && Array.isArray(feed.markets) && feed.markets.length);
@@ -80,23 +82,69 @@ function renderSignalDashboard() {
 
 function deriveStatsFromHistory(signals) {
   if (!signals || signals.length === 0) return null;
-  const closed = signals.filter((s) => (s.status || 'ACTIVE') !== 'ACTIVE');
-  const tp1 = closed.filter((s) => ['HIT_TP1', 'HIT_TP2', 'HIT_TP3'].includes(s.status));
-  const tp2 = closed.filter((s) => ['HIT_TP2', 'HIT_TP3'].includes(s.status));
-  const tp3 = closed.filter((s) => s.status === 'HIT_TP3');
-  const sl = closed.filter((s) => s.status === 'HIT_SL');
+  const tradableSignals = signals.filter((signal) => String(signal.status || '').toUpperCase() !== 'REJECTED');
+  const closed = tradableSignals.filter((signal) => String(signal.status || 'ACTIVE').toUpperCase() !== 'ACTIVE');
+  const wins = closed.filter((signal) => ['HIT_TP1', 'HIT_TP2', 'HIT_TP3'].includes(String(signal.status || '').toUpperCase()));
+  const tp2 = closed.filter((signal) => ['HIT_TP2', 'HIT_TP3'].includes(String(signal.status || '').toUpperCase()));
+  const tp3 = closed.filter((signal) => String(signal.status || '').toUpperCase() === 'HIT_TP3');
+  const losses = closed.filter((signal) => String(signal.status || '').toUpperCase() === 'HIT_SL');
   const total = closed.length || 1;
-  const winRate = ((tp1.length / total) * 100).toFixed(1);
+  const winRate = ((wins.length / total) * 100).toFixed(1);
+  const totalPips = closed.reduce((sum, signal) => {
+    const entry = Number(signal.entry_price);
+    const status = String(signal.status || '').toUpperCase();
+    if (!Number.isFinite(entry)) return sum;
+
+    let move = 0;
+    if (status === 'HIT_TP1') move = Math.abs(Number(signal.tp1) - entry);
+    if (status === 'HIT_TP2') move = Math.abs(Number(signal.tp2) - entry);
+    if (status === 'HIT_TP3') move = Math.abs(Number(signal.tp3) - entry);
+    if (status === 'HIT_SL') move = -Math.abs(Number(signal.stop_loss ?? signal.sl) - entry);
+    return Number.isFinite(move) ? sum + (move / APP_XAU_PIP_SIZE) : sum;
+  }, 0);
 
   return {
-    totalSignals: signals.length,
+    totalSignals: tradableSignals.length,
+    winCount: wins.length,
+    lossCount: losses.length,
     winRate,
-    totalPips: '0.0',
-    tp1Hits: tp1.length,
+    totalPips: totalPips.toFixed(1),
+    expectancy: '0.00',
+    avgRR: '0.00',
+    drawdown: '0.00',
+    tp1Hits: wins.length,
     tp2Hits: tp2.length,
     tp3Hits: tp3.length,
-    slHits: sl.length,
+    slHits: losses.length,
+    laneStats: {
+      intraday: { count: 0, winRate: '0.0', expectancy: '0.00', avgRR: '0.00' },
+      swing: { count: 0, winRate: '0.0', expectancy: '0.00', avgRR: '0.00' },
+    },
+    windows: {
+      w50: { expectancy: '0.00', winRate: '0.0' },
+      w100: { expectancy: '0.00', winRate: '0.0' },
+      w300: { expectancy: '0.00', winRate: '0.0' },
+    },
   };
+}
+
+function renderDemoDashboardFromCache() {
+  if (!lastDemoPerformance) {
+    UI.renderDemoDashboard(null, [], [], []);
+    return;
+  }
+
+  const liveDemoPerformance = typeof API.rehydrateDemoPerformance === 'function'
+    ? API.rehydrateDemoPerformance(lastDemoPerformance, lastXauPriceData?.price)
+    : lastDemoPerformance;
+
+  lastDemoPerformance = liveDemoPerformance;
+  UI.renderDemoDashboard(
+    liveDemoPerformance,
+    liveDemoPerformance?.equityPoints || [],
+    liveDemoPerformance?.trades || [],
+    liveDemoPerformance?.events || [],
+  );
 }
 
 function mergePolymarketDetailIntoFeed(feed, detailRow) {
@@ -217,7 +265,7 @@ async function boot() {
 
     UI.initDemoControls({
       onToggleAutoTrade: async (enabled) => API.setDemoAutoTrade(enabled),
-      onResetDemoAccount: async () => API.resetDemoAccount(),
+      onResetDemoAccount: async () => API.resetLiveState(),
       onRefresh: async () => pollSupabase(),
     });
 
@@ -280,6 +328,7 @@ async function pollPrice(force = false) {
     UI.updateHeaderPrice(data);
     renderSignalDashboard();
   }
+  renderDemoDashboardFromCache();
   window._lastPriceDirection = data.direction;
 }
 
@@ -396,6 +445,7 @@ async function pollSupabase() {
     lastSignalHistory = history || [];
     lastIndicatorSnapshot = snapshot;
     lastRiskState = riskState;
+    lastDemoPerformance = demoPerformance;
 
     ['intraday', 'swing'].forEach((lane) => {
       const signal = currentSignalsByLane[lane];
@@ -413,12 +463,7 @@ async function pollSupabase() {
     UI.renderEvents(events);
     UI.renderHistory(history);
     UI.renderStats(stats || deriveStatsFromHistory(history));
-    UI.renderDemoDashboard(
-      demoPerformance,
-      demoPerformance?.equityPoints || [],
-      demoPerformance?.trades || [],
-      demoPerformance?.events || []
-    );
+    renderDemoDashboardFromCache();
   } catch (err) {
     console.error('Supabase poll error:', err.message);
   }

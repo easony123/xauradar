@@ -52,6 +52,202 @@ function toMillis(value) {
   return Number.isFinite(t) ? t : null;
 }
 
+const XAU_LOT_OUNCES = 100;
+const XAU_USD_PER_PIP_PER_LOT = API_XAU_PIP_SIZE * XAU_LOT_OUNCES;
+
+function normalizeSignalStatus(status) {
+  return String(status || '').trim().toUpperCase();
+}
+
+function isWinningSignalStatus(status) {
+  return ['HIT_TP1', 'HIT_TP2', 'HIT_TP3'].includes(normalizeSignalStatus(status));
+}
+
+function isNeutralSignalStatus(status) {
+  return ['BREAKEVEN', 'EXPIRED'].includes(normalizeSignalStatus(status));
+}
+
+function isClosedSignalStatus(status) {
+  return [...new Set(['HIT_TP1', 'HIT_TP2', 'HIT_TP3', 'HIT_SL', 'BREAKEVEN', 'EXPIRED'])].includes(normalizeSignalStatus(status));
+}
+
+function parseTradeMetadata(value) {
+  const parsed = tryParseJson(value);
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+}
+
+function getTradePriceMove(side, entry, closePrice) {
+  return String(side || 'BUY').toUpperCase() === 'SELL'
+    ? entry - closePrice
+    : closePrice - entry;
+}
+
+function getEffectiveTradeStatus(tradeStatus, signalStatus) {
+  const currentTradeStatus = normalizeSignalStatus(tradeStatus);
+  if (currentTradeStatus !== 'OPEN') return currentTradeStatus;
+
+  const parentSignalStatus = normalizeSignalStatus(signalStatus);
+  if (!parentSignalStatus || parentSignalStatus === 'ACTIVE') return 'OPEN';
+  if (parentSignalStatus === 'HIT_SL') return 'LOSS';
+  if (isWinningSignalStatus(parentSignalStatus)) return 'WIN';
+  if (isNeutralSignalStatus(parentSignalStatus)) return parentSignalStatus;
+  return currentTradeStatus;
+}
+
+function emptyPerformanceStats() {
+  return {
+    totalSignals: 0,
+    winCount: 0,
+    lossCount: 0,
+    winRate: '0.0',
+    totalPips: '0.0',
+    expectancy: '0.00',
+    avgRR: '0.00',
+    drawdown: '0.00',
+    tp1Hits: 0,
+    tp2Hits: 0,
+    tp3Hits: 0,
+    slHits: 0,
+    laneStats: {
+      intraday: { count: 0, winRate: '0.0', expectancy: '0.00', avgRR: '0.00' },
+      swing: { count: 0, winRate: '0.0', expectancy: '0.00', avgRR: '0.00' },
+    },
+    windows: {
+      w50: { expectancy: '0.00', winRate: '0.0' },
+      w100: { expectancy: '0.00', winRate: '0.0' },
+      w300: { expectancy: '0.00', winRate: '0.0' },
+    },
+  };
+}
+
+function buildDemoPerformance(account, trades = [], equityPoints = [], events = [], livePrice = NaN) {
+  if (!account) return null;
+
+  const starting = parseNumber(account.starting_capital, 100000);
+  const balance = parseNumber(account.balance, starting);
+  const liveMarkPrice = parseNumber(livePrice, NaN);
+
+  const normalizedTrades = (Array.isArray(trades) ? trades : []).map((trade) => {
+    const metadata = parseTradeMetadata(trade.metadata);
+    const tradeStatus = normalizeSignalStatus(trade.status);
+    const signalStatus = normalizeSignalStatus(trade.signal_status || trade.signal?.status);
+    const entry = parseNumber(trade.entry, 0);
+    const tradeSize = parseNumber(trade.position_size, 0);
+    const initialPositionSize = parseNumber(metadata.initial_position_size, tradeSize);
+    const remainingPositionSize = parseNumber(metadata.remaining_position_size, tradeSize);
+    const realizedPnlUsd = parseNumber(metadata.realized_pnl_usd, parseNumber(trade.pnl_usd, 0));
+    const realizedPnlPips = parseNumber(metadata.realized_pnl_pips, parseNumber(trade.pnl_pips, 0));
+    const effectiveStatus = getEffectiveTradeStatus(tradeStatus, signalStatus);
+    const isEffectiveOpen = effectiveStatus === 'OPEN';
+
+    let unrealizedPnlUsd = 0;
+    let livePnlUsd = parseNumber(trade.pnl_usd, realizedPnlUsd);
+    let livePnlPips = parseNumber(trade.pnl_pips, realizedPnlPips);
+    let markPrice = null;
+
+    if (isEffectiveOpen && Number.isFinite(liveMarkPrice)) {
+      const priceMove = getTradePriceMove(trade.side, entry, liveMarkPrice);
+      const liveSize = Math.max(remainingPositionSize, 0);
+      unrealizedPnlUsd = priceMove * liveSize;
+      livePnlUsd = realizedPnlUsd + unrealizedPnlUsd;
+      livePnlPips = realizedPnlPips + ((priceMove / API_XAU_PIP_SIZE) * (liveSize / Math.max(initialPositionSize, 1e-9)));
+      markPrice = liveMarkPrice;
+    }
+
+    return {
+      ...trade,
+      metadata,
+      signal_status: signalStatus || null,
+      effectiveStatus,
+      isEffectiveOpen,
+      realizedPnlUsd,
+      unrealizedPnlUsd,
+      livePnlUsd,
+      livePnlPips,
+      initialPositionSize,
+      remainingPositionSize,
+      markPrice,
+    };
+  });
+
+  const effectiveOpenTrades = normalizedTrades.filter((trade) => trade.isEffectiveOpen);
+  const closedTrades = normalizedTrades.filter((trade) => !trade.isEffectiveOpen && trade.effectiveStatus !== 'OPEN');
+  const wins = closedTrades.filter((trade) => trade.effectiveStatus === 'WIN');
+  const losses = closedTrades.filter((trade) => trade.effectiveStatus === 'LOSS');
+  const totalClosed = closedTrades.length;
+  const winRate = totalClosed > 0 ? (wins.length / totalClosed) * 100 : 0;
+  const unrealizedPnlTotal = effectiveOpenTrades.reduce((acc, trade) => acc + parseNumber(trade.unrealizedPnlUsd, 0), 0);
+  const closedPnlTotal = balance - starting;
+  const pnlTotal = closedPnlTotal + unrealizedPnlTotal;
+  const equity = balance + unrealizedPnlTotal;
+  const roiPct = starting > 0 ? ((equity - starting) / starting) * 100 : 0;
+  const expectancyR = totalClosed > 0
+    ? closedTrades.reduce((acc, trade) => acc + parseNumber(trade.pnl_r, 0), 0) / totalClosed
+    : 0;
+
+  const basePoints = Array.isArray(equityPoints)
+    ? equityPoints.map((point) => ({
+      ...point,
+      balance: parseNumber(point.balance, 0),
+      equity: parseNumber(point.equity, 0),
+    }))
+    : [];
+  const points = basePoints.slice();
+  if (points.length === 0 || parseNumber(points[points.length - 1]?.equity, NaN) !== equity) {
+    points.push({
+      ts: new Date().toISOString(),
+      equity,
+      balance,
+    });
+  }
+
+  let peak = starting;
+  let maxDrawdownPct = 0;
+  points.forEach((point) => {
+    const value = parseNumber(point.equity, 0);
+    if (value > peak) peak = value;
+    if (peak > 0) {
+      const drawdownPct = ((peak - value) / peak) * 100;
+      if (drawdownPct > maxDrawdownPct) maxDrawdownPct = drawdownPct;
+    }
+  });
+
+  const laneStats = ['intraday', 'swing'].reduce((out, lane) => {
+    const rows = closedTrades.filter((trade) => String(trade.lane || 'intraday').toLowerCase() === lane);
+    const laneWins = rows.filter((trade) => trade.effectiveStatus === 'WIN').length;
+    out[lane] = {
+      trades: rows.length,
+      winRate: rows.length > 0 ? (laneWins / rows.length) * 100 : 0,
+      pnl: rows.reduce((acc, trade) => acc + parseNumber(trade.livePnlUsd, 0), 0),
+    };
+    return out;
+  }, {});
+
+  return {
+    account,
+    balance,
+    equity,
+    starting,
+    roiPct,
+    openTrades: effectiveOpenTrades.length,
+    totalClosed,
+    wins: wins.length,
+    losses: losses.length,
+    winRate,
+    pnlTotal,
+    closedPnlTotal,
+    unrealizedPnlTotal,
+    expectancyR,
+    maxDrawdownPct,
+    laneStats,
+    equityPointsBase: basePoints,
+    equityPoints: points,
+    trades: normalizedTrades,
+    events: Array.isArray(events) ? events : [],
+    effectiveOpenTrades,
+  };
+}
+
 const POLYMARKET_BASE_URL = 'https://gamma-api.polymarket.com';
 const POLYMARKET_MARKET_PAGE_SIZE = 200;
 const POLYMARKET_CATEGORY_PRIORITY = {
@@ -1052,24 +1248,27 @@ async function fetchPerformanceStats() {
     const { data, error } = await supabaseClient
       .from('signals')
       .select('*')
+      .neq('status', 'REJECTED')
       .order('created_at', { ascending: false })
       .limit(200);
 
     if (error) throw error;
-    if (!data || data.length === 0) return null;
+    const tradableRows = (data || []).filter((row) => normalizeSignalStatus(row.status) !== 'REJECTED');
+    if (tradableRows.length === 0) return emptyPerformanceStats();
 
     const realizedStatuses = ['HIT_TP1', 'HIT_TP2', 'HIT_TP3', 'HIT_SL', 'BREAKEVEN', 'EXPIRED'];
-    const realizedRows = data.filter((s) => realizedStatuses.includes(s.status));
-    const rejectedRows = data.filter((s) => s.status === 'REJECTED');
-    const executedRows = data.filter((s) => s.status !== 'REJECTED');
+    const realizedRows = tradableRows.filter((row) => realizedStatuses.includes(normalizeSignalStatus(row.status)));
+    const winRows = realizedRows.filter((row) => isWinningSignalStatus(row.status));
+    const lossRows = realizedRows.filter((row) => normalizeSignalStatus(row.status) === 'HIT_SL');
 
     const mapStatusR = (status) => {
-      if (status === 'HIT_TP1') return 1.0;
-      if (status === 'HIT_TP2') return 2.0;
-      if (status === 'HIT_TP3') return 3.0;
-      if (status === 'HIT_SL') return -1.0;
-      if (status === 'BREAKEVEN') return 0.0;
-      if (status === 'EXPIRED') return -0.2;
+      const normalized = normalizeSignalStatus(status);
+      if (normalized === 'HIT_TP1') return 1.0;
+      if (normalized === 'HIT_TP2') return 2.0;
+      if (normalized === 'HIT_TP3') return 3.0;
+      if (normalized === 'HIT_SL') return -1.0;
+      if (normalized === 'BREAKEVEN') return 0.0;
+      if (normalized === 'EXPIRED') return -0.2;
       return 0;
     };
 
@@ -1153,9 +1352,9 @@ async function fetchPerformanceStats() {
     });
 
     return {
-      totalSignals: data.length,
-      executedCount: executedRows.length,
-      rejectedCount: rejectedRows.length,
+      totalSignals: tradableRows.length,
+      winCount: winRows.length,
+      lossCount: lossRows.length,
       winRate: overall.winRate.toFixed(1),
       totalPips: totalPips.toFixed(1),
       expectancy: overall.expectancy.toFixed(2),
@@ -1188,6 +1387,25 @@ async function fetchPerformanceStats() {
   } catch (err) {
     console.error('Stats error:', err.message);
     return null;
+  }
+}
+
+async function fetchSignalsByIds(signalIds = []) {
+  if (!supabaseClient || !Array.isArray(signalIds) || signalIds.length === 0) return new Map();
+  try {
+    const uniqueIds = [...new Set(signalIds.filter(Boolean))];
+    if (uniqueIds.length === 0) return new Map();
+
+    const { data, error } = await supabaseClient
+      .from('signals')
+      .select('id,status,created_at,entry_price,sl,tp1,tp2,tp3,lane,type')
+      .in('id', uniqueIds);
+
+    if (error) throw error;
+    return new Map((data || []).map((row) => [row.id, row]));
+  } catch (err) {
+    console.error('Signal status map fetch error:', err.message);
+    return new Map();
   }
 }
 
@@ -1339,6 +1557,27 @@ async function resetDemoAccount() {
   }
 }
 
+async function resetLiveState() {
+  if (!supabaseClient) return null;
+  const user = await getCurrentUser();
+  if (!user?.id) return null;
+
+  try {
+    const { data, error } = await supabaseClient.rpc('reset_live_demo_state', { p_user_id: user.id });
+    if (error) throw error;
+    const result = Array.isArray(data) ? (data[0] || null) : (data || null);
+    if (result && result.ok === false) {
+      throw new Error(result.reason === 'NO_ACTIVE_SIGNAL'
+        ? 'No ACTIVE signal is available to keep, so nothing was deleted.'
+        : 'Live state reset failed.');
+    }
+    return result;
+  } catch (err) {
+    console.error('Live state reset error:', err.message);
+    throw err;
+  }
+}
+
 async function fetchDemoPerformance() {
   const [account, trades, equityPoints, events] = await Promise.all([
     fetchDemoAccount(),
@@ -1349,71 +1588,28 @@ async function fetchDemoPerformance() {
 
   if (!account) return null;
 
-  const starting = parseNumber(account.starting_capital, 100000);
-  const balance = parseNumber(account.balance, starting);
-  const equity = parseNumber(account.equity, balance);
-  const openTrades = trades.filter((t) => String(t.status || '').toUpperCase() === 'OPEN');
-  const closedTrades = trades.filter((t) => String(t.status || '').toUpperCase() !== 'OPEN');
-  const wins = closedTrades.filter((t) => String(t.status || '').toUpperCase() === 'WIN');
-  const losses = closedTrades.filter((t) => String(t.status || '').toUpperCase() === 'LOSS');
-
-  const totalClosed = closedTrades.length;
-  const winRate = totalClosed > 0 ? (wins.length / totalClosed) * 100 : 0;
-  const pnlTotal = closedTrades.reduce((acc, t) => acc + parseNumber(t.pnl_usd, 0), 0);
-  const roiPct = starting > 0 ? ((balance - starting) / starting) * 100 : 0;
-  const expectancyR = totalClosed > 0
-    ? closedTrades.reduce((acc, t) => acc + parseNumber(t.pnl_r, 0), 0) / totalClosed
-    : 0;
-
-  const points = [...equityPoints];
-  if (points.length === 0 || parseNumber(points[points.length - 1]?.equity, NaN) !== equity) {
-    points.push({
-      ts: new Date().toISOString(),
-      equity,
-      balance,
-    });
-  }
-  let peak = starting;
-  let maxDrawdownPct = 0;
-  points.forEach((p) => {
-    const e = parseNumber(p.equity, 0);
-    if (e > peak) peak = e;
-    if (peak > 0) {
-      const ddPct = ((peak - e) / peak) * 100;
-      if (ddPct > maxDrawdownPct) maxDrawdownPct = ddPct;
-    }
+  const signalMap = await fetchSignalsByIds((trades || []).map((trade) => trade.signal_id));
+  const tradesWithSignals = (trades || []).map((trade) => {
+    const signal = signalMap.get(trade.signal_id) || null;
+    return {
+      ...trade,
+      signal,
+      signal_status: signal?.status || null,
+    };
   });
 
-  const laneStats = ['intraday', 'swing'].reduce((out, lane) => {
-    const rows = closedTrades.filter((t) => String(t.lane || 'intraday').toLowerCase() === lane);
-    const laneWins = rows.filter((t) => String(t.status || '').toUpperCase() === 'WIN').length;
-    out[lane] = {
-      trades: rows.length,
-      winRate: rows.length > 0 ? (laneWins / rows.length) * 100 : 0,
-      pnl: rows.reduce((acc, t) => acc + parseNumber(t.pnl_usd, 0), 0),
-    };
-    return out;
-  }, {});
+  return buildDemoPerformance(account, tradesWithSignals, equityPoints, events);
+}
 
-  return {
-    account,
-    balance,
-    equity,
-    starting,
-    roiPct,
-    openTrades: openTrades.length,
-    totalClosed,
-    wins: wins.length,
-    losses: losses.length,
-    winRate,
-    pnlTotal,
-    expectancyR,
-    maxDrawdownPct,
-    laneStats,
-    equityPoints: points,
-    trades,
-    events,
-  };
+function rehydrateDemoPerformance(perf, livePrice = NaN) {
+  if (!perf?.account) return perf;
+  return buildDemoPerformance(
+    perf.account,
+    perf.trades || [],
+    perf.equityPointsBase || perf.equityPoints || [],
+    perf.events || [],
+    livePrice,
+  );
 }
 
 window.API = {
@@ -1428,8 +1624,10 @@ window.API = {
   fetchDemoTradeEvents,
   fetchDemoPerformance,
   fetchDemoEquityCurve,
+  rehydrateDemoPerformance,
   setDemoAutoTrade,
   resetDemoAccount,
+  resetLiveState,
   fetchLivePrice,
   fetchCandles,
   fetchChartCandles,

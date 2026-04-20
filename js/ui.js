@@ -2630,7 +2630,7 @@ function renderStats(stats) {
   if (heroEl) {
     heroEl.innerHTML = `
       <div class="stats-hero__winrate">${stats.winRate}%</div>
-      <div class="stats-hero__label">Win Rate (${stats.totalSignals} signals) | Expectancy ${stats.expectancy ?? '--'}R</div>
+      <div class="stats-hero__label">Win Rate (${stats.totalSignals} tradable signals) | Expectancy ${stats.expectancy ?? '--'}R</div>
       ${stats.windows ? `<div class="stats-hero__label">Rolling E: 50=${stats.windows.w50?.expectancy ?? '--'} | 100=${stats.windows.w100?.expectancy ?? '--'} | 300=${stats.windows.w300?.expectancy ?? '--'}</div>` : ''}
     `;
   }
@@ -2643,8 +2643,8 @@ function renderStats(stats) {
         <div class="stat-tile__value">${stats.totalSignals}</div>
       </div>
       <div class="stat-tile">
-        <div class="stat-tile__label">Executed / Rejected</div>
-        <div class="stat-tile__value">${stats.executedCount ?? '--'} / ${stats.rejectedCount ?? '--'}</div>
+        <div class="stat-tile__label">Execution</div>
+        <div class="stat-tile__value">${stats.winCount ?? 0}W / ${stats.lossCount ?? 0}L</div>
       </div>
       <div class="stat-tile">
         <div class="stat-tile__label">Total Pips</div>
@@ -2701,16 +2701,16 @@ function initDemoControls({ onToggleAutoTrade, onResetDemoAccount, onRefresh }) 
   if (resetBtn && !resetBtn.dataset.bound) {
     resetBtn.dataset.bound = '1';
     resetBtn.addEventListener('click', async () => {
-      const ok = window.confirm('Reset demo account to $100,000 and clear all demo trades?');
+      const ok = window.confirm('Reset live state? This keeps only the newest ACTIVE signal, deletes older signal history, clears demo trades/events/equity, and resets the account to $100,000.');
       if (!ok) return;
       resetBtn.disabled = true;
-      if (status) status.textContent = 'Resetting demo account...';
+      if (status) status.textContent = 'Resetting live stats and demo state...';
       try {
         await onResetDemoAccount();
-        if (status) status.textContent = 'Demo account reset complete.';
+        if (status) status.textContent = 'Live state reset complete.';
         if (onRefresh) await onRefresh();
       } catch (err) {
-        if (status) status.textContent = err?.message || 'Demo reset failed.';
+        if (status) status.textContent = err?.message || 'Live state reset failed.';
       } finally {
         resetBtn.disabled = false;
       }
@@ -2722,6 +2722,13 @@ function formatMoney(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return '--';
   return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function formatSignedMoney(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '--';
+  const prefix = n > 0 ? '+' : n < 0 ? '-' : '';
+  return `${prefix}$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function renderDemoEquityCurve(points) {
@@ -2809,11 +2816,33 @@ function renderDemoDashboard(perf, curve = [], trades = [], events = []) {
     </div>
   `;
 
+  const openRows = Array.isArray(perf.effectiveOpenTrades) ? perf.effectiveOpenTrades.slice(0, 6) : [];
   const eventRows = Array.isArray(events) ? events.slice(0, 24) : [];
-  const tradeRows = Array.isArray(trades) ? trades.slice(0, 20) : [];
-  if (eventRows.length === 0 && tradeRows.length === 0) {
+  const tradeRows = Array.isArray(trades)
+    ? trades.filter((trade) => !trade.isEffectiveOpen).slice(0, 20)
+    : [];
+  if (openRows.length === 0 && eventRows.length === 0 && tradeRows.length === 0) {
     history.innerHTML = '<div class="feature-note">No demo trades yet.</div>';
-  } else if (eventRows.length > 0) {
+  } else {
+    const openMarkup = openRows.map((trade) => {
+      const laneText = String(trade.lane || 'intraday').toUpperCase();
+      const sideText = String(trade.side || '--').toUpperCase();
+      const pnl = Number(trade.livePnlUsd || 0);
+      const pnlCls = pnl > 0 ? 'profit' : pnl < 0 ? 'loss' : 'text-muted';
+      return `
+        <div class="demo-trade-row">
+          <div class="demo-trade-row__left">
+            <div class="demo-trade-row__meta">${laneText} | ${sideText} | LIVE OPEN</div>
+            <div class="demo-trade-row__sub">Entry ${Number(trade.entry || 0).toFixed(2)} | Mark ${Number.isFinite(Number(trade.markPrice)) ? Number(trade.markPrice).toFixed(2) : '--'} | Size ${Number(trade.remainingPositionSize || trade.position_size || 0).toFixed(3)}</div>
+          </div>
+          <div class="demo-trade-row__right">
+            <div class="demo-trade-row__pnl ${pnlCls}">${formatSignedMoney(pnl)}</div>
+            <div class="demo-trade-row__sub">${formatMalaysiaTime(trade.opened_at, true)}</div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
     const eventLabels = {
       OPEN: 'OPEN',
       TP1_PARTIAL: 'TP1 partial',
@@ -2824,7 +2853,7 @@ function renderDemoDashboard(perf, curve = [], trades = [], events = []) {
       BREAKEVEN: 'Breakeven',
       EXPIRED: 'Expired',
     };
-    history.innerHTML = eventRows.map((evt) => {
+    const eventMarkup = eventRows.map((evt) => {
       const laneText = String(evt.lane || 'intraday').toUpperCase();
       const eventType = String(evt.event_type || '--').toUpperCase();
       const price = Number(evt.event_price || 0);
@@ -2843,12 +2872,12 @@ function renderDemoDashboard(perf, curve = [], trades = [], events = []) {
         </div>
       `;
     }).join('');
-  } else {
-    history.innerHTML = tradeRows.map((t) => {
+
+    const tradeMarkup = tradeRows.map((t) => {
       const side = String(t.side || '--').toUpperCase();
       const laneText = String(t.lane || 'intraday').toUpperCase();
-      const statusText = String(t.status || '--').toUpperCase();
-      const pnl = Number(t.pnl_usd || 0);
+      const statusText = String(t.effectiveStatus || t.status || '--').toUpperCase();
+      const pnl = Number(t.livePnlUsd ?? t.pnl_usd ?? 0);
       const pnlCls = statusText === 'BREAKEVEN' ? 'text-muted' : (pnl >= 0 ? 'profit' : 'loss');
       return `
         <div class="demo-trade-row">
@@ -2863,11 +2892,13 @@ function renderDemoDashboard(perf, curve = [], trades = [], events = []) {
         </div>
       `;
     }).join('');
+
+    history.innerHTML = [openMarkup, eventMarkup, tradeMarkup].filter(Boolean).join('');
   }
 
   if (toggle) toggle.checked = Boolean(perf.account.auto_trade_enabled);
   if (status && !status.textContent) {
-    status.textContent = `Expectancy: ${Number(perf.expectancyR || 0).toFixed(2)}R`;
+    status.textContent = `Live demo P/L follows active signals and the latest XAU price.`;
   }
 
   renderDemoEquityCurve((Array.isArray(curve) && curve.length > 0) ? curve : perf.equityPoints || []);
@@ -2877,89 +2908,65 @@ function updateRiskCalc(signal, riskState = null) {
   const lotInput = document.getElementById('lot-input');
   if (!lotInput) return;
   const equityInput = document.getElementById('equity-input');
-  const riskPctInput = document.getElementById('risk-percent-input');
-  const laneSelect = document.getElementById('lane-risk-select');
-  const posSizeEl = document.getElementById('position-size-value');
+  const pipChangeInput = document.getElementById('pip-change-input');
+  const plPreviewEl = document.getElementById('pl-preview-value');
+  const advisedLotEl = document.getElementById('advised-lot-value');
   const riskGuardEl = document.getElementById('risk-guard-note');
-
-  const body = document.getElementById('risk-calc-body');
-  if (!body) return;
-
-  const applyLanePreset = () => {
-    if (!riskPctInput || !laneSelect) return;
-    if (!riskPctInput.dataset.userEdited) {
-      riskPctInput.value = laneSelect.value === 'swing' ? '0.75' : '0.50';
-    }
-  };
+  const dollarsPerPipPerLot = XAU_PIP_SIZE * 100;
 
   const setValues = () => {
-    const vals = body.querySelectorAll('.risk-val__num');
-    if (vals.length < 4) return;
-    if (!lotInput._riskSignal) {
-      vals.forEach((el) => {
-        el.textContent = '--';
-        el.className = 'risk-val__num text-muted';
-      });
-      return;
+    const lotSize = Math.max(parseFloat(lotInput?.value || '0') || 0, 0);
+    const equity = Math.max(parseFloat(equityInput?.value || '10000') || 0, 0);
+    const pipChange = parseFloat(pipChangeInput?.value || '0') || 0;
+    const plPreview = pipChange * lotSize * dollarsPerPipPerLot;
+
+    if (plPreviewEl) {
+      plPreviewEl.textContent = formatSignedMoney(plPreview);
+      plPreviewEl.className = `risk-val__num ${plPreview > 0 ? 'profit' : plPreview < 0 ? 'loss' : 'text-muted'}`;
     }
 
     const signalData = lotInput._riskSignal;
-    const equity = parseFloat(equityInput?.value || '10000') || 10000;
-    const riskPct = parseFloat(riskPctInput?.value || signalData.risk_percent_used || '0.50') || 0.5;
+    if (!signalData) {
+      if (advisedLotEl) {
+        advisedLotEl.textContent = '--';
+        advisedLotEl.className = 'risk-val__num text-muted';
+      }
+      if (riskGuardEl) {
+        riskGuardEl.textContent = 'Advice appears when a tradable signal is live.';
+      }
+      return;
+    }
+
+    const lane = String(signalData.lane || 'intraday').toLowerCase() === 'swing' ? 'swing' : 'intraday';
+    const riskPct = lane === 'swing' ? 0.75 : 0.50;
     const entry = parseFloat(signalData.entry_price) || 0;
     const sl = parseFloat(signalData.stop_loss ?? signalData.sl) || 0;
-    const tp1 = parseFloat(signalData.tp1) || 0;
-    const tp2 = parseFloat(signalData.tp2) || 0;
-    const tp3 = parseFloat(signalData.tp3) || 0;
     const stopDist = Math.abs(entry - sl);
     const riskDollars = equity * (riskPct / 100);
-    const posSize = stopDist > 0 ? riskDollars / stopDist : 0;
-    if (posSizeEl) posSizeEl.textContent = Number.isFinite(posSize) ? posSize.toFixed(3) : '--';
+    const stopPips = stopDist > 0 ? (stopDist / XAU_PIP_SIZE) : 0;
+    const advisedLot = stopPips > 0 ? (riskDollars / (stopPips * dollarsPerPipPerLot)) : NaN;
 
-    vals[0].textContent = `-$${riskDollars.toFixed(2)}`;
-    vals[0].className = 'risk-val__num loss';
-    vals[1].textContent = `+$${(riskDollars * (Math.abs(tp1 - entry) / Math.max(stopDist, 0.0001))).toFixed(2)}`;
-    vals[1].className = 'risk-val__num profit';
-    vals[2].textContent = `+$${(riskDollars * (Math.abs(tp2 - entry) / Math.max(stopDist, 0.0001))).toFixed(2)}`;
-    vals[2].className = 'risk-val__num profit';
-    vals[3].textContent = `+$${(riskDollars * (Math.abs(tp3 - entry) / Math.max(stopDist, 0.0001))).toFixed(2)}`;
-    vals[3].className = 'risk-val__num profit';
+    if (advisedLotEl) {
+      advisedLotEl.textContent = Number.isFinite(advisedLot) ? advisedLot.toFixed(2) : '--';
+      advisedLotEl.className = `risk-val__num ${Number.isFinite(advisedLot) ? 'profit' : 'text-muted'}`;
+    }
+
+    if (riskGuardEl) {
+      riskGuardEl.textContent = Number.isFinite(advisedLot)
+        ? `Advice uses ${lane === 'swing' ? 'Swing 0.75%' : 'Intraday 0.50%'} risk over a ${stopPips.toFixed(1)}p stop on the live signal.`
+        : 'Advice appears when a tradable signal is live.';
+    }
   };
 
   if (!lotInput._riskBound) {
     lotInput.addEventListener('input', setValues);
     if (equityInput) equityInput.addEventListener('input', setValues);
-    if (riskPctInput) {
-      riskPctInput.addEventListener('input', () => {
-        riskPctInput.dataset.userEdited = '1';
-        setValues();
-      });
-    }
-    if (laneSelect) {
-      laneSelect.addEventListener('change', () => {
-        if (riskPctInput?.dataset) delete riskPctInput.dataset.userEdited;
-        applyLanePreset();
-        setValues();
-      });
-    }
+    if (pipChangeInput) pipChangeInput.addEventListener('input', setValues);
     lotInput._riskBound = true;
   }
 
-  applyLanePreset();
-  if (laneSelect && signal && !laneSelect.dataset.userEdited) {
-    laneSelect.value = signal.lane === 'swing' ? 'swing' : 'intraday';
-    applyLanePreset();
-  }
   lotInput._riskSignal = signal || null;
   setValues();
-
-  if (riskGuardEl && riskState) {
-    const dailyLoss = Number(riskState.daily_loss_pct || 0).toFixed(2);
-    const streak = Number(riskState.consecutive_sl || 0);
-    const cooldown = riskState.cooldown_until ? `Cooldown until ${formatMalaysiaTime(riskState.cooldown_until, true)}` : 'No cooldown';
-    const halt = riskState.halted_reason ? ` | Halt: ${riskState.halted_reason}` : '';
-    riskGuardEl.textContent = `Daily risk: ${dailyLoss}% loss | Consecutive SL: ${streak} | ${cooldown}${halt}`;
-  }
 }
 
 window.UI = {

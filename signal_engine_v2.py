@@ -1094,6 +1094,43 @@ def sync_demo_trades_for_active_signals(active_by_lane: dict[str, dict]) -> None
         create_demo_trades_for_signal(active_signal)
 
 
+def reconcile_demo_trades_for_closed_signals(current_price: float) -> None:
+    try:
+        open_resp = (
+            supabase.table("demo_trades")
+            .select("signal_id")
+            .eq("status", "OPEN")
+            .execute()
+        )
+        open_rows = open_resp.data or []
+    except Exception as e:
+        print(f"  WARNING: stale demo trade scan failed: {type(e).__name__}: {e}")
+        return
+
+    signal_ids = sorted({row.get("signal_id") for row in open_rows if row.get("signal_id")})
+    if not signal_ids:
+        return
+
+    try:
+        signal_resp = (
+            supabase.table("signals")
+            .select("*")
+            .in_("id", signal_ids)
+            .execute()
+        )
+        signal_rows = signal_resp.data or []
+    except Exception as e:
+        print(f"  WARNING: stale demo signal lookup failed: {type(e).__name__}: {e}")
+        return
+
+    for signal_row in signal_rows:
+        signal_status = str(signal_row.get("status", "")).upper()
+        if signal_status not in SIGNAL_STATUS_CLOSED:
+            continue
+        print(f"  Reconciling stale open demo trades for signal {signal_row.get('id')} status {signal_status}")
+        settle_demo_trades_for_signal(signal_row, signal_status, current_price)
+
+
 def settle_demo_trades_for_signal(signal_row: dict, closed_status: str, current_price: float) -> None:
     if closed_status not in SIGNAL_STATUS_CLOSED:
         return
@@ -1715,6 +1752,7 @@ def run_signal_engine() -> None:
     df_h4 = calculate_confirm_indicators(df_h4)
 
     current_price = safe_float(df_m15.iloc[-1]["Close"], 0)
+    reconcile_demo_trades_for_closed_signals(current_price)
     spread_info = fetch_latest_spread()
     dxy = fetch_dxy_quote()
     session = get_session_context()
