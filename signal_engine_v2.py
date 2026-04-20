@@ -50,6 +50,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 SIGNAL_STATUS_CLOSED = ("HIT_TP1", "HIT_TP2", "HIT_TP3", "HIT_SL", "BREAKEVEN", "EXPIRED")
 SIGNAL_STATUS_REJECTED = "REJECTED"
 DEMO_TP1_CLOSE_FRACTION = min(max(float(os.getenv("DEMO_TP1_CLOSE_FRACTION", "0.40")), 0.05), 0.95)
+DEMO_MIN_STOP_DISTANCE = max(float(os.getenv("DEMO_MIN_STOP_DISTANCE", str(XAU_PIP_SIZE * 5))), XAU_PIP_SIZE)
 LANE_ORDER = ("intraday", "swing")
 
 TELEGRAM_EVENT_LABELS = {
@@ -507,6 +508,42 @@ def fetch_latest_spread() -> dict:
         return {"spread": None, "source": "unknown"}
 
 
+def check_market_tick_freshness(warn_minutes: int = 10, alert_minutes: int = 15) -> dict:
+    try:
+        resp = (
+            supabase.table("market_ticks")
+            .select("created_at,provider_ts,source,price")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        row = (resp.data or [None])[0]
+        if not row:
+            print("  ALERT: market_ticks table is empty during market-open run.")
+            return {"ok": False, "age_minutes": None, "severity": "alert", "reason": "NO_TICKS"}
+
+        ref_dt = parse_dt(row.get("provider_ts")) or parse_dt(row.get("created_at"))
+        if not ref_dt:
+            print("  ALERT: latest market_ticks row has invalid timestamp.")
+            return {"ok": False, "age_minutes": None, "severity": "alert", "reason": "BAD_TIMESTAMP"}
+
+        age_minutes = max(0, int((datetime.now(timezone.utc) - ref_dt).total_seconds() // 60))
+        source = str(row.get("source") or "unknown").upper()
+        price = safe_float(row.get("price"), 0)
+        print(f"  market_ticks freshness: age={age_minutes}m source={source} price={price:.2f}")
+
+        if age_minutes >= alert_minutes:
+            print(f"  ALERT: market_ticks stale for {age_minutes}m (>= {alert_minutes}m) while market is open.")
+            return {"ok": False, "age_minutes": age_minutes, "severity": "alert", "reason": "STALE_ALERT"}
+        if age_minutes >= warn_minutes:
+            print(f"  WARNING: market_ticks age {age_minutes}m (>= {warn_minutes}m). Price pipeline may be degraded.")
+            return {"ok": True, "age_minutes": age_minutes, "severity": "warning", "reason": "STALE_WARN"}
+        return {"ok": True, "age_minutes": age_minutes, "severity": "ok", "reason": "FRESH"}
+    except Exception as e:
+        print(f"  WARNING: market_ticks freshness check failed: {type(e).__name__}: {e}")
+        return {"ok": True, "age_minutes": None, "severity": "unknown", "reason": "CHECK_FAILED"}
+
+
 def calculate_trigger_indicators(df: pd.DataFrame) -> pd.DataFrame:
     close = df["Close"]
     high = df["High"]
@@ -928,6 +965,9 @@ def create_demo_trades_for_signal(signal_row: dict) -> None:
         return
 
     created = 0
+    failed = 0
+    skipped_existing = 0
+    guard_applied = 0
     for account in accounts:
         user_id = account.get("user_id")
         if not user_id:
@@ -935,6 +975,7 @@ def create_demo_trades_for_signal(signal_row: dict) -> None:
             continue
         if user_id in existing_users:
             print(f"  Demo trade already exists for user {user_id} signal {signal_id}")
+            skipped_existing += 1
             continue
 
         risk_model = parse_json_object(account.get("risk_model"))
@@ -942,11 +983,31 @@ def create_demo_trades_for_signal(signal_row: dict) -> None:
         if risk_percent <= 0:
             risk_percent = signal_risk_pct if signal_risk_pct > 0 else 0.5
 
+        effective_sl = sl
+        stop_distance = abs(entry - sl)
+        guard_meta: dict[str, Any] = {}
+        if stop_distance < DEMO_MIN_STOP_DISTANCE:
+            guard_applied += 1
+            if side == "SELL":
+                effective_sl = entry + DEMO_MIN_STOP_DISTANCE
+            else:
+                effective_sl = max(entry - DEMO_MIN_STOP_DISTANCE, 0.0001)
+            guard_meta = {
+                "stop_distance_guard_applied": True,
+                "requested_sl": round(sl, 6),
+                "effective_sl": round(effective_sl, 6),
+                "min_stop_distance": round(DEMO_MIN_STOP_DISTANCE, 6),
+            }
+            print(
+                f"  WARNING: stop-distance guard applied for signal {signal_id} user {user_id}: "
+                f"requested_sl={sl:.5f} effective_sl={effective_sl:.5f}"
+            )
+
         position_size = compute_position_size(
             balance=safe_float(account.get("balance"), 100000),
             risk_percent=risk_percent,
             entry=entry,
-            sl=sl,
+            sl=effective_sl,
         )
 
         row = {
@@ -956,7 +1017,7 @@ def create_demo_trades_for_signal(signal_row: dict) -> None:
             "side": side,
             "status": "OPEN",
             "entry": round(entry, 5),
-            "sl": round(sl, 5),
+            "sl": round(effective_sl, 5),
             "tp1": round(tp1, 5),
             "tp2": round(tp2, 5),
             "tp3": round(tp3, 5),
@@ -965,7 +1026,7 @@ def create_demo_trades_for_signal(signal_row: dict) -> None:
             "position_size": round(position_size, 6),
             "metadata": {
                 "source": "signal_engine_v2",
-                "orig_sl": round(sl, 6),
+                "orig_sl": round(effective_sl, 6),
                 "initial_position_size": round(position_size, 6),
                 "remaining_position_size": round(position_size, 6),
                 "tp1_fraction": DEMO_TP1_CLOSE_FRACTION,
@@ -974,12 +1035,26 @@ def create_demo_trades_for_signal(signal_row: dict) -> None:
                 "realized_pnl_r": 0.0,
                 "realized_pnl_pips": 0.0,
                 "partial_fills": [],
+                **guard_meta,
             },
         }
         print(f"  Demo trade payload for user {user_id}: {_dump_json(row)}")
         try:
-            insert_resp = supabase.table("demo_trades").insert(row).select("id").execute()
-            inserted_trade = (insert_resp.data or [None])[0] if insert_resp else None
+            insert_resp = supabase.table("demo_trades").insert(row).execute()
+            inserted_rows = insert_resp.data if insert_resp else None
+            inserted_trade = (inserted_rows or [None])[0]
+            if not inserted_trade:
+                lookup_resp = (
+                    supabase.table("demo_trades")
+                    .select("id")
+                    .eq("signal_id", signal_id)
+                    .eq("user_id", user_id)
+                    .eq("status", "OPEN")
+                    .order("opened_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                inserted_trade = (lookup_resp.data or [None])[0]
             created += 1
             record_demo_trade_event(
                 trade_id=(inserted_trade or {}).get("id"),
@@ -996,9 +1071,15 @@ def create_demo_trades_for_signal(signal_row: dict) -> None:
                 meta={"side": side},
             )
         except Exception as e:
+            failed += 1
             print(f"  WARNING: demo trade insert failed for user {user_id}: {type(e).__name__}: {e}")
             print(f"  Failed payload for user {user_id}: {_dump_json(row)}")
 
+    print(
+        f"  Demo trade sync stats for {signal_id}: "
+        f"created={created} failed={failed} skipped_existing={skipped_existing} "
+        f"stop_guard_applied={guard_applied}"
+    )
     if created > 0:
         print(f"  Demo trades opened: {created}")
     else:
@@ -1615,6 +1696,7 @@ def run_signal_engine() -> None:
     if not market_clock["market_open"]:
         print(f"  Market closed ({market_clock['reason']}): skipping candle fetch, signal generation, and signal expiry checks.")
         return
+    check_market_tick_freshness(warn_minutes=10, alert_minutes=15)
 
     df_m15 = fetch_candles("XAU/USD", 15, "minute")
     df_h1 = fetch_candles("XAU/USD", 1, "hour")

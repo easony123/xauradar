@@ -1,8 +1,10 @@
 name: Twelve Data Price Collector
 
 on:
-  # Manual fallback only.
-  # Primary schedule moved to Supabase Scheduler (every 3 minutes).
+  # Primary schedule remains Supabase Scheduler (every 3 minutes).
+  # GitHub schedule is a lightweight fallback to prevent prolonged stale price data.
+  schedule:
+    - cron: '17,47 * * * *'  # Every 30 minutes, offset from top-of-hour.
   workflow_dispatch:
 
 permissions:

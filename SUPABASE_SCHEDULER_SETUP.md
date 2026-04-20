@@ -46,6 +46,8 @@ Run:
 in Supabase SQL Editor.
 
 Both SQL files already target your current project URL and schedule every 3 minutes.
+If `PRICE_COLLECTOR_CRON_SECRET` is enabled, set `v_price_collector_cron_secret` inside
+`price_collector_every_3m.sql` to the same value before running it.
 
 ## 4) Verify
 
@@ -58,5 +60,6 @@ Both SQL files already target your current project URL and schedule every 3 minu
 
 ## 5) Fallback
 
-GitHub `Twelve Data Price Collector` workflow remains as **manual-only** fallback (`workflow_dispatch`).
+GitHub `Twelve Data Price Collector` workflow also runs on a lightweight **30-minute fallback schedule**
+and still supports manual dispatch (`workflow_dispatch`).
 GitHub `Polymarket Collector` workflow is also **manual-only** fallback (`workflow_dispatch`).
