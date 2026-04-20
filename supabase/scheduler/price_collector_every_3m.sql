@@ -4,8 +4,8 @@
 -- This schedule calls your project edge function URL directly.
 -- If PRICE_COLLECTOR_CRON_SECRET is configured on the Edge Function,
 -- set v_price_collector_cron_secret below to the same value.
--- If your deployed function returns UNAUTHORIZED_NO_AUTH_HEADER, set
--- v_price_collector_auth_token (JWT-style anon/service token) and this
+-- If your deployed function returns 401 because JWT auth is still enabled,
+-- set v_price_collector_auth_token to the live service-role JWT and this
 -- script will include Authorization/apikey headers automatically.
 
 create extension if not exists pg_cron with schema extensions;

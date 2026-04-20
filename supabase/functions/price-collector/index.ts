@@ -19,8 +19,11 @@ const SERVICE_ROLE_KEY = Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPAB
 const PRICE_COLLECTOR_CRON_SECRET = Deno.env.get("PRICE_COLLECTOR_CRON_SECRET") ?? "";
 const SYMBOL = Deno.env.get("TWELVE_SYMBOL") ?? "XAU/USD";
 const TWELVE_BASE_URL = "https://api.twelvedata.com";
-const MARKET_REOPEN_SUNDAY_UTC_HOUR = 22;
-const MARKET_CLOSE_FRIDAY_UTC_HOUR = 22;
+const MARKET_TIMEZONE = "America/New_York";
+const MARKET_OPEN_SUNDAY_NY_HOUR = 17;
+const MARKET_CLOSE_FRIDAY_NY_HOUR = 17;
+const DAILY_BREAK_START_NY_HOUR = 17;
+const DAILY_BREAK_END_NY_HOUR = 18;
 
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -58,29 +61,77 @@ function clampToRecent(isoTs: string, maxAgeMinutes = 30): string {
   return ageMin > maxAgeMinutes ? new Date().toISOString() : new Date(ts).toISOString();
 }
 
+function getTimeZoneParts(now = new Date(), timeZone = MARKET_TIMEZONE) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(now);
+  const getPart = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  const weekdayLabel = getPart("weekday");
+  const weekdayMap: Record<string, number> = {
+    Sun: 0,
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+  };
+
+  return {
+    timeZone,
+    weekday: weekdayMap[weekdayLabel] ?? -1,
+    weekdayLabel,
+    year: Number(getPart("year")),
+    month: Number(getPart("month")),
+    day: Number(getPart("day")),
+    hour: Number(getPart("hour")),
+    minute: Number(getPart("minute")),
+    second: Number(getPart("second")),
+  };
+}
+
 function getMarketClockContext(now = new Date()) {
-  const weekday = now.getUTCDay(); // 0=Sun, 5=Fri, 6=Sat
-  const totalMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const reopenMinutes = MARKET_REOPEN_SUNDAY_UTC_HOUR * 60;
-  const fridayCloseMinutes = MARKET_CLOSE_FRIDAY_UTC_HOUR * 60;
+  const ny = getTimeZoneParts(now);
+  const totalMinutes = ny.hour * 60 + ny.minute;
+  const sundayOpenMinutes = MARKET_OPEN_SUNDAY_NY_HOUR * 60;
+  const fridayCloseMinutes = MARKET_CLOSE_FRIDAY_NY_HOUR * 60;
+  const dailyBreakStartMinutes = DAILY_BREAK_START_NY_HOUR * 60;
+  const dailyBreakEndMinutes = DAILY_BREAK_END_NY_HOUR * 60;
 
   let marketOpen = true;
   let reason = "OPEN";
-  if (weekday === 6) {
+  if (ny.weekday === 6) {
     marketOpen = false;
     reason = "SATURDAY_CLOSED";
-  } else if (weekday === 0 && totalMinutes < reopenMinutes) {
+  } else if (ny.weekday === 0 && totalMinutes < sundayOpenMinutes) {
     marketOpen = false;
     reason = "SUNDAY_PREOPEN";
-  } else if (weekday === 5 && totalMinutes >= fridayCloseMinutes) {
+  } else if (ny.weekday === 5 && totalMinutes >= fridayCloseMinutes) {
     marketOpen = false;
     reason = "FRIDAY_AFTER_CLOSE";
+  } else if (ny.weekday >= 1 && ny.weekday <= 4 && totalMinutes >= dailyBreakStartMinutes && totalMinutes < dailyBreakEndMinutes) {
+    marketOpen = false;
+    reason = "DAILY_MAINTENANCE_BREAK";
   }
 
   return {
     marketOpen,
     reason,
-    weekday,
+    nyWeekday: ny.weekday,
+    nyWeekdayLabel: ny.weekdayLabel,
+    nyHour: ny.hour,
+    nyMinute: ny.minute,
+    nySecond: ny.second,
+    marketTimeZone: ny.timeZone,
     utcHour: now.getUTCHours(),
     utcMinute: now.getUTCMinutes(),
   };
@@ -207,7 +258,12 @@ Deno.serve(async (req) => {
       reason: "MARKET_CLOSED",
       market_reason: marketClock.reason,
       market_clock: {
-        weekday: marketClock.weekday,
+        ny_weekday: marketClock.nyWeekday,
+        ny_weekday_label: marketClock.nyWeekdayLabel,
+        ny_hour: marketClock.nyHour,
+        ny_minute: marketClock.nyMinute,
+        ny_second: marketClock.nySecond,
+        market_time_zone: marketClock.marketTimeZone,
         utc_hour: marketClock.utcHour,
         utc_minute: marketClock.utcMinute,
       },

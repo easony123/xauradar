@@ -1,9 +1,8 @@
-name: XAUUSD Price Collector Fallback
+name: XAUUSD Price Collector Recovery
 
 on:
-  # Primary schedule remains Supabase Scheduler (every 3 minutes).
-  # Automatic GitHub fallback now piggybacks on the Signal Bot workflow schedule.
-  # Keep this workflow as manual recovery for operators and debugging.
+  # Primary automation belongs to Supabase Scheduler + Edge Function.
+  # Keep this workflow as manual recovery / live edge-function verification only.
   workflow_dispatch:
 
 permissions:
@@ -14,64 +13,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  collect-price:
+  recover-price:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 2
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Validate required secrets
+      - name: Validate recovery secrets
         env:
-          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
-          [ -n "$TWELVE_DATA_API_KEY" ] || (echo "Missing secret: TWELVE_DATA_API_KEY" && exit 1)
           [ -n "$SUPABASE_URL" ] || (echo "Missing secret: SUPABASE_URL" && exit 1)
           [ -n "$SUPABASE_SERVICE_KEY" ] || (echo "Missing secret: SUPABASE_SERVICE_KEY" && exit 1)
 
-      - name: Collect two cycles with retry
+      - name: Invoke live edge function
         env:
-          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          PRICE_COLLECTOR_CRON_SECRET: ${{ secrets.PRICE_COLLECTOR_CRON_SECRET }}
         run: |
           set -euo pipefail
+          endpoint="${SUPABASE_URL%/}/functions/v1/price-collector"
+          response_file="$(mktemp)"
+          headers=(
+            -H "Content-Type: application/json"
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}"
+            -H "apikey: ${SUPABASE_SERVICE_KEY}"
+          )
 
-          run_collect() {
-            local cycle="$1"
-            local ok=0
-            for attempt in 1 2; do
-              echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Cycle ${cycle} attempt ${attempt}"
-              if python twelve_price_collector.py; then
-                ok=1
-                break
-              fi
-              echo "Cycle ${cycle} attempt ${attempt} failed."
-              sleep 5
-            done
+          if [ -n "${PRICE_COLLECTOR_CRON_SECRET:-}" ]; then
+            headers+=(-H "x-cron-secret: ${PRICE_COLLECTOR_CRON_SECRET}")
+          fi
 
-            if [ "$ok" -ne 1 ]; then
-              echo "::error::Cycle ${cycle} failed after retries; dashboard may show STALE if last tick is older than 15 minutes."
-              return 1
-            fi
-          }
-
-          run_collect 1
-          sleep 150
-          run_collect 2
+          status=$(curl -sS -o "$response_file" -w "%{http_code}" -X POST "${headers[@]}" "$endpoint" --data '{}')
+          cat "$response_file"
+          echo
+          test "$status" -ge 200
+          test "$status" -lt 300
 
       - name: Failure annotation
         if: failure()
-        run: echo "::error::Twelve Data collector workflow failed. Check logs for retry attempts and last inserted tick timestamp/source."
+        run: echo "::error::Manual edge-function recovery failed. Check whether the live price-collector deployment, secrets, or scheduler auth settings are still misaligned."

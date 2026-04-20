@@ -1,6 +1,12 @@
 # Supabase Scheduler (Every 3 Minutes)
 
 This runs collectors from Supabase scheduler instead of GitHub cron.
+XAUUSD automatic refresh should come only from:
+
+- Supabase Scheduler
+- Supabase Edge Function `price-collector`
+- Twelve Data API
+- `market_ticks`
 
 ## 1) Deploy edge function
 
@@ -48,9 +54,11 @@ in Supabase SQL Editor.
 Both SQL files already target your current project URL and schedule every 3 minutes.
 If `PRICE_COLLECTOR_CRON_SECRET` is enabled, set `v_price_collector_cron_secret` inside
 `price_collector_every_3m.sql` to the same value before running it.
-If your edge endpoint returns `UNAUTHORIZED_NO_AUTH_HEADER`, set
-`v_price_collector_auth_token` in `price_collector_every_3m.sql` (JWT-style token)
-or redeploy `price-collector` with `verify_jwt = false` to allow scheduler calls without auth.
+If your live edge endpoint returns `401`, align auth in one of these two modes:
+
+- Preferred: redeploy `price-collector` with `verify_jwt = false`, then leave `v_price_collector_auth_token` blank.
+- Alternative: keep JWT auth enabled and set `v_price_collector_auth_token` in `price_collector_every_3m.sql`
+  to the live service-role JWT so scheduler calls include `Authorization` and `apikey` headers.
 
 ## 4) Verify
 
@@ -60,9 +68,10 @@ or redeploy `price-collector` with `verify_jwt = false` to allow scheduler calls
 4. `market_ticks` receives new rows every ~3 minutes.
 5. `crypto_ticks` and `polymarket_markets` receive updates every ~3 minutes.
 6. Website source badge no longer flips to `STALE` during normal operation.
+7. During the New York daily maintenance break, `price-collector` returns `skipped` and does not hit Twelve Data.
 
 ## 5) Fallback
 
-GitHub automatic fallback now runs inside the scheduled `XAUUSD Signal Bot` workflow every **5 minutes**.
-`XAUUSD Price Collector Fallback` remains available for manual dispatch (`workflow_dispatch`) recovery.
+GitHub is **not** the automatic XAUUSD refresh path.
+`XAUUSD Price Collector Recovery` is a manual emergency workflow that calls the live edge function directly for debugging/recovery.
 GitHub `Polymarket Collector` workflow is also **manual-only** fallback (`workflow_dispatch`).
