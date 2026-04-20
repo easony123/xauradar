@@ -4,6 +4,9 @@
 -- This schedule calls your project edge function URL directly.
 -- If PRICE_COLLECTOR_CRON_SECRET is configured on the Edge Function,
 -- set v_price_collector_cron_secret below to the same value.
+-- If your deployed function returns UNAUTHORIZED_NO_AUTH_HEADER, set
+-- v_price_collector_auth_token (JWT-style anon/service token) and this
+-- script will include Authorization/apikey headers automatically.
 
 create extension if not exists pg_cron with schema extensions;
 create extension if not exists pg_net with schema extensions;
@@ -28,16 +31,23 @@ $$;
 do $$
 declare
   v_price_collector_cron_secret text := '';
+  v_price_collector_auth_token text := '';
   v_headers jsonb;
 begin
-  if coalesce(v_price_collector_cron_secret, '') = '' then
-    v_headers := jsonb_build_object(
-      'Content-Type', 'application/json'
-    );
-  else
-    v_headers := jsonb_build_object(
-      'Content-Type', 'application/json',
+  v_headers := jsonb_build_object(
+    'Content-Type', 'application/json'
+  );
+
+  if coalesce(v_price_collector_cron_secret, '') <> '' then
+    v_headers := v_headers || jsonb_build_object(
       'x-cron-secret', v_price_collector_cron_secret
+    );
+  end if;
+
+  if coalesce(v_price_collector_auth_token, '') <> '' then
+    v_headers := v_headers || jsonb_build_object(
+      'Authorization', 'Bearer ' || v_price_collector_auth_token,
+      'apikey', v_price_collector_auth_token
     );
   end if;
 

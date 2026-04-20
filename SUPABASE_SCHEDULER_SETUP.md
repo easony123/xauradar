@@ -48,6 +48,9 @@ in Supabase SQL Editor.
 Both SQL files already target your current project URL and schedule every 3 minutes.
 If `PRICE_COLLECTOR_CRON_SECRET` is enabled, set `v_price_collector_cron_secret` inside
 `price_collector_every_3m.sql` to the same value before running it.
+If your edge endpoint returns `UNAUTHORIZED_NO_AUTH_HEADER`, set
+`v_price_collector_auth_token` in `price_collector_every_3m.sql` (JWT-style token)
+or redeploy `price-collector` with `verify_jwt = false` to allow scheduler calls without auth.
 
 ## 4) Verify
 
@@ -60,6 +63,6 @@ If `PRICE_COLLECTOR_CRON_SECRET` is enabled, set `v_price_collector_cron_secret`
 
 ## 5) Fallback
 
-GitHub `Twelve Data Price Collector` workflow also runs on a lightweight **30-minute fallback schedule**
+GitHub `Twelve Data Price Collector` workflow also runs on a **5-minute fallback schedule**
 and still supports manual dispatch (`workflow_dispatch`).
 GitHub `Polymarket Collector` workflow is also **manual-only** fallback (`workflow_dispatch`).
