@@ -63,6 +63,6 @@ or redeploy `price-collector` with `verify_jwt = false` to allow scheduler calls
 
 ## 5) Fallback
 
-GitHub `Twelve Data Price Collector` workflow also runs on a **5-minute fallback schedule**
+GitHub `XAUUSD Price Collector Fallback` workflow also runs on a **5-minute fallback schedule**
 and still supports manual dispatch (`workflow_dispatch`).
 GitHub `Polymarket Collector` workflow is also **manual-only** fallback (`workflow_dispatch`).

@@ -1,9 +1,9 @@
-name: Twelve Data Price Collector
+name: XAUUSD Price Collector Fallback
 
 on:
   # Primary schedule remains Supabase Scheduler (every 3 minutes).
-  # GitHub schedule is a fallback to prevent prolonged stale price data.
-  # Touching this workflow also helps GitHub re-register the fallback cron.
+  # This GitHub workflow is a resilience fallback for price freshness.
+  # It uses a distinct workflow identity to avoid stale schedule registration.
   schedule:
     - cron: '*/5 * * * *'  # Every 5 minutes fallback when primary scheduler degrades.
   workflow_dispatch:
