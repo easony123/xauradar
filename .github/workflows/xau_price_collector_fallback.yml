@@ -2,10 +2,8 @@ name: XAUUSD Price Collector Fallback
 
 on:
   # Primary schedule remains Supabase Scheduler (every 3 minutes).
-  # This GitHub workflow is a resilience fallback for price freshness.
-  # It uses a distinct workflow identity to avoid stale schedule registration.
-  schedule:
-    - cron: '*/5 * * * *'  # Every 5 minutes fallback when primary scheduler degrades.
+  # Automatic GitHub fallback now piggybacks on the Signal Bot workflow schedule.
+  # Keep this workflow as manual recovery for operators and debugging.
   workflow_dispatch:
 
 permissions:

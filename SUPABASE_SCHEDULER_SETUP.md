@@ -63,6 +63,6 @@ or redeploy `price-collector` with `verify_jwt = false` to allow scheduler calls
 
 ## 5) Fallback
 
-GitHub `XAUUSD Price Collector Fallback` workflow also runs on a **5-minute fallback schedule**
-and still supports manual dispatch (`workflow_dispatch`).
+GitHub automatic fallback now runs inside the scheduled `XAUUSD Signal Bot` workflow every **5 minutes**.
+`XAUUSD Price Collector Fallback` remains available for manual dispatch (`workflow_dispatch`) recovery.
 GitHub `Polymarket Collector` workflow is also **manual-only** fallback (`workflow_dispatch`).
