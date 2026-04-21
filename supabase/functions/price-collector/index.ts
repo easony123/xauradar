@@ -240,14 +240,13 @@ Deno.serve(async (req) => {
     return jsonResponse({ error: "Missing required edge function secrets" }, 500);
   }
 
-  // Optional shared-secret guard for scheduler calls.
-  // If PRICE_COLLECTOR_CRON_SECRET is not configured, the endpoint remains callable
-  // only by URL knowledge and should be rotated to a guarded mode later.
-  if (PRICE_COLLECTOR_CRON_SECRET) {
-    const secret = req.headers.get("x-cron-secret") ?? "";
-    if (!secret || secret !== PRICE_COLLECTOR_CRON_SECRET) {
-      return jsonResponse({ error: "Unauthorized" }, 401);
-    }
+  if (!PRICE_COLLECTOR_CRON_SECRET) {
+    return jsonResponse({ error: "Missing required secret: PRICE_COLLECTOR_CRON_SECRET" }, 500);
+  }
+
+  const secret = req.headers.get("x-cron-secret") ?? "";
+  if (!secret || secret !== PRICE_COLLECTOR_CRON_SECRET) {
+    return jsonResponse({ error: "Unauthorized" }, 401);
   }
 
   const marketClock = getMarketClockContext();

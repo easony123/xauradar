@@ -7,7 +7,7 @@ ALTER TABLE public.signals
 
 ALTER TABLE public.signals
   ADD CONSTRAINT signals_status_check
-  CHECK (status IN ('ACTIVE', 'HIT_TP1', 'HIT_TP2', 'HIT_TP3', 'HIT_SL', 'EXPIRED', 'REJECTED'));
+  CHECK (status IN ('ACTIVE', 'HIT_TP1', 'HIT_TP2', 'HIT_TP3', 'HIT_SL', 'BREAKEVEN', 'EXPIRED', 'REJECTED'));
 
 -- 2) Add new decision-engine columns
 ALTER TABLE public.signals ADD COLUMN IF NOT EXISTS lane TEXT DEFAULT 'intraday';
@@ -43,7 +43,6 @@ CREATE POLICY "Allow public read on risk_guard_state"
 
 DROP POLICY IF EXISTS "Allow service write on risk_guard_state" ON public.risk_guard_state;
 CREATE POLICY "Allow service write on risk_guard_state"
-  ON public.risk_guard_state FOR ALL
+  ON public.risk_guard_state FOR ALL TO service_role
   USING (true)
   WITH CHECK (true);
-

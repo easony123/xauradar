@@ -476,11 +476,13 @@ Deno.serve(async (req) => {
     return jsonResponse({ error: "Missing required edge function secrets" }, 500);
   }
 
-  if (POLYMARKET_COLLECTOR_CRON_SECRET) {
-    const secret = req.headers.get("x-cron-secret") ?? "";
-    if (!secret || secret !== POLYMARKET_COLLECTOR_CRON_SECRET) {
-      return jsonResponse({ error: "Unauthorized" }, 401);
-    }
+  if (!POLYMARKET_COLLECTOR_CRON_SECRET) {
+    return jsonResponse({ error: "Missing required secret: POLYMARKET_COLLECTOR_CRON_SECRET" }, 500);
+  }
+
+  const secret = req.headers.get("x-cron-secret") ?? "";
+  if (!secret || secret !== POLYMARKET_COLLECTOR_CRON_SECRET) {
+    return jsonResponse({ error: "Unauthorized" }, 401);
   }
 
   const supabase = createClient(PROJECT_URL, SERVICE_ROLE_KEY);
