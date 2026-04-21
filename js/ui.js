@@ -2817,7 +2817,9 @@ function renderDemoDashboard(perf, curve = [], trades = [], events = []) {
   `;
 
   const openRows = Array.isArray(perf.effectiveOpenTrades) ? perf.effectiveOpenTrades.slice(0, 6) : [];
-  const eventRows = Array.isArray(events) ? events.slice(0, 24) : [];
+  const eventRows = Array.isArray(events)
+    ? events.filter((evt) => String(evt.event_type || '').toUpperCase() !== 'OPEN').slice(0, 24)
+    : [];
   const tradeRows = Array.isArray(trades)
     ? trades.filter((trade) => !trade.isEffectiveOpen).slice(0, 20)
     : [];
@@ -2844,14 +2846,14 @@ function renderDemoDashboard(perf, curve = [], trades = [], events = []) {
     }).join('');
 
     const eventLabels = {
-      OPEN: 'OPEN',
-      TP1_PARTIAL: 'TP1 partial',
-      SL_TO_BREAKEVEN: 'SL -> breakeven',
-      TP2: 'TP2',
-      TP3: 'TP3',
-      STOP_LOSS: 'Stop loss',
-      BREAKEVEN: 'Breakeven',
-      EXPIRED: 'Expired',
+      OPEN: 'Trade opened',
+      TP1_PARTIAL: 'TP1 partial fill',
+      SL_TO_BREAKEVEN: 'Stop moved to breakeven',
+      TP2: 'Final exit at TP2',
+      TP3: 'Final exit at TP3',
+      STOP_LOSS: 'Final exit at stop loss',
+      BREAKEVEN: 'Final exit at breakeven',
+      EXPIRED: 'Final exit expired',
     };
     const eventMarkup = eventRows.map((evt) => {
       const laneText = String(evt.lane || 'intraday').toUpperCase();

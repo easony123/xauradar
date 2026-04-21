@@ -15,7 +15,7 @@ concurrency:
 jobs:
   generate-signals:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
 
     steps:
       - name: Checkout code
@@ -40,6 +40,9 @@ jobs:
           [ -n "$SUPABASE_URL" ] || (echo "Missing secret: SUPABASE_URL" && exit 1)
           [ -n "$SUPABASE_SERVICE_KEY" ] || (echo "Missing secret: SUPABASE_SERVICE_KEY" && exit 1)
 
+      - name: Workflow start marker
+        run: echo "Signal bot workflow started at $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
       - name: Run signal generator
         env:
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
@@ -47,4 +50,10 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONUNBUFFERED: "1"
         run: python signal_generator.py
+
+      - name: Workflow heartbeat
+        if: always()
+        run: |
+          echo "Signal bot workflow finished at $(date -u +"%Y-%m-%dT%H:%M:%SZ")"

@@ -52,6 +52,10 @@ SIGNAL_STATUS_REJECTED = "REJECTED"
 DEMO_TP1_CLOSE_FRACTION = min(max(float(os.getenv("DEMO_TP1_CLOSE_FRACTION", "0.40")), 0.05), 0.95)
 DEMO_MIN_STOP_DISTANCE = max(float(os.getenv("DEMO_MIN_STOP_DISTANCE", str(XAU_PIP_SIZE * 5))), XAU_PIP_SIZE)
 LANE_ORDER = ("intraday", "swing")
+SIGNAL_EXPIRY_HOURS = int(os.getenv("SIGNAL_EXPIRY_HOURS", "6"))
+EXECUTION_VERSION = 2
+ENGINE_STALE_ALERT_MINUTES = 10
+ENGINE_ALERT_DEDUPE_MINUTES = 30
 
 TELEGRAM_EVENT_LABELS = {
     "NEW_SIGNAL": "New active signal",
@@ -156,6 +160,17 @@ def _dump_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _tick_time_iso(row: dict) -> str:
+    return (row.get("provider_ts") or row.get("created_at") or datetime.now(timezone.utc).isoformat())
+
+
+def _build_event_key(signal_id: str | None, event_type: str, source_tick_time: str | None, suffix: str | None = None) -> str:
+    parts = [str(signal_id or "signal"), str(event_type or "EVENT"), str(source_tick_time or "no-tick")]
+    if suffix:
+        parts.append(str(suffix))
+    return ":".join(parts)
+
+
 def _candidate_ui_payload(candidate: dict | None, decision_state: str, reason: str, signal_id: str | None = None, created_at: str | None = None) -> dict:
     if not candidate:
         return {
@@ -186,6 +201,10 @@ def _candidate_ui_payload(candidate: dict | None, decision_state: str, reason: s
         "news_context": candidate.get("news_context", {}),
         "blocked_reason": candidate.get("blocked_reason"),
         "tp1_be_applied": False,
+        "tp1_hit_at": None,
+        "last_tick_checked_at": None,
+        "last_event_seq": 0,
+        "execution_version": EXECUTION_VERSION,
         "adaptive_exits": {
             "regime": candidate.get("regime"),
             "session": candidate.get("session_name"),
@@ -311,6 +330,170 @@ def insert_decision_run(market_price: float, lane_payloads: dict[str, dict], met
         print(f"  WARNING: signal decision run insert failed: {e}")
 
 
+def record_engine_runtime_event(stage: str, market_price: float = 0.0, meta: dict | None = None) -> None:
+    row = {
+        "market_price": round(safe_float(market_price, 0), 5),
+        "intraday_decision": {},
+        "swing_decision": {},
+        "meta": {"run_stage": stage, **(meta or {})},
+    }
+    try:
+        supabase.table("signal_decision_runs").insert(row).execute()
+    except Exception as e:
+        print(f"  WARNING: engine runtime event insert failed: {e}")
+
+
+def _truncate_for_log(value: Any, limit: int = 320) -> str:
+    try:
+        text = value if isinstance(value, str) else _dump_json(value)
+    except Exception:
+        text = str(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
+def _log_demo_settlement_issue(
+    stage: str,
+    signal_id: str | None,
+    trade_id: str | None = None,
+    status: str | None = None,
+    payload: dict | None = None,
+    error: Exception | None = None,
+    extra: dict | None = None,
+) -> None:
+    error_type = type(error).__name__ if error else None
+    error_message = str(error) if error else None
+    detail = {
+        "signal_id": signal_id,
+        "trade_id": trade_id,
+        "status": status,
+        "error_type": error_type,
+        "error_message": error_message,
+        "payload": payload or {},
+        **(extra or {}),
+    }
+    print(
+        "  WARNING: demo settlement issue | "
+        f"stage={stage} signal_id={signal_id} trade_id={trade_id} status={status} "
+        f"error={error_type or 'N/A'}:{error_message or 'n/a'} "
+        f"payload={_truncate_for_log(payload or {})}"
+    )
+    record_engine_runtime_event(
+        "DEMO_SETTLEMENT_ERROR",
+        meta={
+            "demo_settlement_stage": stage,
+            "demo_settlement_error": error_message,
+            "demo_settlement_error_type": error_type,
+            "demo_settlement_signal_id": signal_id,
+            "demo_settlement_trade_id": trade_id,
+            "demo_settlement_status": status,
+            "demo_settlement_payload": _truncate_for_log(payload or {}),
+            **(extra or {}),
+        },
+    )
+
+
+def _fetch_demo_trade_by_id(trade_id: str | None) -> dict | None:
+    if not trade_id:
+        return None
+    resp = (
+        supabase.table("demo_trades")
+        .select("*")
+        .eq("id", trade_id)
+        .limit(1)
+        .execute()
+    )
+    return (resp.data or [None])[0]
+
+
+def _persist_demo_trade_update(
+    trade_id: str | None,
+    signal_id: str | None,
+    status: str,
+    update_payload: dict,
+    verifier,
+) -> tuple[bool, dict | None]:
+    if not trade_id:
+        return False, None
+
+    supabase.table("demo_trades").update(update_payload).eq("id", trade_id).eq("status", "OPEN").execute()
+    refreshed = _fetch_demo_trade_by_id(trade_id)
+    if refreshed and verifier(refreshed):
+        return True, refreshed
+    raise RuntimeError(
+        f"demo trade update verification failed for {trade_id} "
+        f"(status={refreshed.get('status') if refreshed else 'missing'})"
+    )
+
+
+def _latest_completed_decision_run(limit: int = 20) -> dict | None:
+    try:
+        resp = (
+            supabase.table("signal_decision_runs")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        for row in resp.data or []:
+            meta = parse_json_object(row.get("meta"))
+            stage = str(meta.get("run_stage") or "COMPLETED").upper()
+            if stage == "COMPLETED":
+                return row
+    except Exception as e:
+        print(f"  WARNING: latest decision-run lookup failed: {e}")
+    return None
+
+
+def _recent_runtime_alert_exists(kind: str, within_minutes: int = ENGINE_ALERT_DEDUPE_MINUTES, limit: int = 30) -> bool:
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(within_minutes, 1))
+    try:
+        resp = (
+            supabase.table("signal_decision_runs")
+            .select("created_at,meta")
+            .gte("created_at", cutoff.isoformat())
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        for row in resp.data or []:
+            meta = parse_json_object(row.get("meta"))
+            if str(meta.get("run_stage") or "").upper() != "ALERT":
+                continue
+            if str(meta.get("alert_kind") or "").upper() == str(kind or "").upper():
+                return True
+    except Exception as e:
+        print(f"  WARNING: runtime alert lookup failed: {e}")
+    return False
+
+
+def send_operational_alert(kind: str, text: str, meta: dict | None = None) -> bool:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    if _recent_runtime_alert_exists(kind):
+        return False
+    try:
+        resp = HTTP.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+            timeout=15,
+        )
+        if resp.ok:
+            record_engine_runtime_event(
+                "ALERT",
+                meta={
+                    "alert_kind": kind,
+                    "message": text,
+                    **(meta or {}),
+                },
+            )
+            return True
+    except Exception as e:
+        print(f"  WARNING: operational alert send failed: {e}")
+    return False
+
+
 def _notification_sent(signal_id: str | None, event_type: str) -> bool:
     if not signal_id:
         return False
@@ -345,15 +528,22 @@ def _record_notification(signal_id: str | None, lane: str, event_type: str, payl
         print(f"  WARNING: signal notification record failed: {e}")
 
 
-def notify_signal_event(signal: dict, event_type: str, reason: str, event_price: float | None = None, meta: dict | None = None) -> None:
+def notify_signal_event(
+    signal: dict,
+    event_type: str,
+    reason: str,
+    event_price: float | None = None,
+    meta: dict | None = None,
+    event_key: str | None = None,
+) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
+        return False
 
     signal_id = signal.get("id") or signal.get("signal_id")
     lane = str(signal.get("lane") or "intraday").upper()
     side = str(signal.get("type") or "WAIT").upper()
     if not signal_id or _notification_sent(signal_id, event_type):
-        return
+        return False
 
     conditions = signal.get("conditions_met")
     if not isinstance(conditions, dict):
@@ -381,11 +571,37 @@ def notify_signal_event(signal: dict, event_type: str, reason: str, event_price:
                 signal_id=signal_id,
                 lane=str(signal.get("lane") or "intraday"),
                 event_type=event_type,
-                payload_hash=f"{signal_id}:{event_type}:{reason}",
+                payload_hash=event_key or f"{signal_id}:{event_type}:{reason}",
                 meta={"reason": reason, **(meta or {})},
             )
+            return True
     except Exception:
-        pass
+        return False
+    return False
+
+
+def _demo_trade_event_exists(trade_id: str | None, event_type: str, event_key: str | None = None, limit: int = 20) -> bool:
+    if not trade_id:
+        return False
+    try:
+        resp = (
+            supabase.table("demo_trade_events")
+            .select("id,meta")
+            .eq("trade_id", trade_id)
+            .eq("event_type", event_type)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = resp.data or []
+        if not event_key:
+            return bool(rows)
+        for row in rows:
+            if parse_json_object(row.get("meta")).get("event_key") == event_key:
+                return True
+    except Exception as e:
+        print(f"  WARNING: demo trade event lookup failed for {trade_id}: {e}")
+    return False
 
 
 def record_demo_trade_event(
@@ -401,9 +617,15 @@ def record_demo_trade_event(
     pnl_r: float,
     pnl_pips: float,
     meta: dict | None = None,
-) -> None:
+    event_key: str | None = None,
+) -> bool:
     if not trade_id or not user_id:
-        return
+        return False
+    meta_payload = {**(meta or {})}
+    if event_key:
+        meta_payload["event_key"] = event_key
+    if _demo_trade_event_exists(trade_id, event_type, event_key):
+        return False
     try:
         supabase.table("demo_trade_events").insert(
             {
@@ -418,11 +640,13 @@ def record_demo_trade_event(
                 "pnl_usd": round(safe_float(pnl_usd, 0), 6),
                 "pnl_r": round(safe_float(pnl_r, 0), 6),
                 "pnl_pips": round(safe_float(pnl_pips, 0), 6),
-                "meta": meta or {},
+                "meta": meta_payload,
             }
         ).execute()
+        return True
     except Exception as e:
         print(f"  WARNING: demo trade event insert failed for {trade_id}: {e}")
+        return False
 
 
 def fetch_candles(symbol: str, multiplier: int, timespan: str, bars: int = 220) -> pd.DataFrame | None:
@@ -506,6 +730,207 @@ def fetch_latest_spread() -> dict:
     except Exception as e:
         print(f"  WARNING: spread query failed: {e}")
         return {"spread": None, "source": "unknown"}
+
+
+def fetch_latest_tick() -> dict:
+    try:
+        resp = (
+            supabase.table("market_ticks")
+            .select("created_at,provider_ts,price,bid,ask,source")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        row = (resp.data or [None])[0]
+        if not row:
+            return {"price": 0.0, "bid": 0.0, "ask": 0.0, "mid": 0.0, "source": "unknown", "created_at": None}
+
+        price = safe_float(row.get("price"), 0)
+        bid = safe_float(row.get("bid"), price)
+        ask = safe_float(row.get("ask"), price)
+        if bid > 0 and ask > 0 and ask >= bid:
+            mid = (bid + ask) / 2.0
+        else:
+            mid = price
+            if bid <= 0:
+                bid = price
+            if ask <= 0:
+                ask = price
+        return {
+            "price": price,
+            "bid": bid,
+            "ask": ask,
+            "mid": max(mid, 0.0),
+            "source": str(row.get("source") or "unknown").upper(),
+            "created_at": row.get("created_at"),
+            "provider_ts": row.get("provider_ts"),
+        }
+    except Exception as e:
+        print(f"  WARNING: latest tick query failed: {e}")
+        return {"price": 0.0, "bid": 0.0, "ask": 0.0, "mid": 0.0, "source": "unknown", "created_at": None}
+
+
+def initialize_execution_state(signal_row: dict) -> dict:
+    conditions = parse_json_object(signal_row.get("conditions_met"))
+    conditions.setdefault("execution_version", EXECUTION_VERSION)
+    conditions.setdefault("last_tick_checked_at", None)
+    conditions.setdefault("tp1_be_applied", False)
+    conditions.setdefault("tp1_hit_at", None)
+    conditions.setdefault("last_event_seq", 0)
+    return conditions
+
+
+def fetch_market_ticks_for_signal(signal_row: dict, limit: int = 1500) -> list[dict]:
+    conditions = initialize_execution_state(signal_row)
+    since = parse_dt(conditions.get("last_tick_checked_at")) or parse_dt(signal_row.get("created_at"))
+    query = (
+        supabase.table("market_ticks")
+        .select("created_at,provider_ts,price,bid,ask,source")
+        .order("created_at", desc=False)
+        .limit(limit)
+    )
+    if since:
+        query = query.gt("created_at", since.isoformat())
+
+    try:
+        resp = query.execute()
+        rows = resp.data or []
+    except Exception as e:
+        print(f"  WARNING: market tick fetch failed for signal {signal_row.get('id')}: {e}")
+        return []
+
+    normalized: list[dict] = []
+    for row in rows:
+        price = safe_float(row.get("price"), 0)
+        bid = safe_float(row.get("bid"), price)
+        ask = safe_float(row.get("ask"), price)
+        if bid <= 0:
+            bid = price
+        if ask <= 0:
+            ask = price
+        normalized.append(
+            {
+                **row,
+                "price": price,
+                "bid": bid,
+                "ask": ask,
+                "mid": ((bid + ask) / 2.0) if bid > 0 and ask > 0 else price,
+                "tick_time": _tick_time_iso(row),
+            }
+        )
+    return normalized
+
+
+def evaluate_signal_crossings(signal_row: dict, ticks: list[dict]) -> dict:
+    conditions = initialize_execution_state(signal_row)
+    side = str(signal_row.get("type", "BUY")).upper()
+    entry = safe_float(signal_row.get("entry_price"), 0)
+    tp1 = safe_float(signal_row.get("tp1"), 0)
+    tp2 = safe_float(signal_row.get("tp2"), 0)
+    tp3 = safe_float(signal_row.get("tp3"), 0)
+    stop_price = safe_float(signal_row.get("sl"), 0)
+    partial_tick: dict | None = None
+    final_status: str | None = None
+    final_tick: dict | None = None
+    tp1_applied = bool(conditions.get("tp1_be_applied"))
+
+    for tick in ticks:
+        trigger_price = safe_float(tick.get("bid"), safe_float(tick.get("price"), 0)) if side == "BUY" else safe_float(tick.get("ask"), safe_float(tick.get("price"), 0))
+
+        if not tp1_applied and entry > 0 and tp1 > 0:
+            tp1_crossed = trigger_price >= tp1 if side == "BUY" else trigger_price <= tp1
+            if tp1_crossed:
+                partial_tick = tick
+                tp1_applied = True
+                stop_price = entry
+                conditions["tp1_be_applied"] = True
+                conditions["tp1_hit_at"] = tick.get("tick_time")
+
+        if tp3 > 0:
+            tp3_crossed = trigger_price >= tp3 if side == "BUY" else trigger_price <= tp3
+            if tp3_crossed:
+                final_status = "HIT_TP3"
+                final_tick = tick
+                break
+
+        if tp2 > 0:
+            tp2_crossed = trigger_price >= tp2 if side == "BUY" else trigger_price <= tp2
+            if tp2_crossed:
+                final_status = "HIT_TP2"
+                final_tick = tick
+                break
+
+        if stop_price > 0:
+            stop_crossed = trigger_price <= stop_price if side == "BUY" else trigger_price >= stop_price
+            if stop_crossed:
+                final_status = "BREAKEVEN" if (tp1_applied and abs(stop_price - entry) <= 0.011) else "HIT_SL"
+                final_tick = tick
+                break
+
+    latest_tick_time = ticks[-1].get("tick_time") if ticks else conditions.get("last_tick_checked_at")
+    return {
+        "conditions": conditions,
+        "partial_tick": partial_tick,
+        "final_status": final_status,
+        "final_tick": final_tick,
+        "latest_tick_time": latest_tick_time,
+    }
+
+
+def update_signal_execution_state(
+    signal_row: dict,
+    conditions_state: dict,
+    new_status: str | None = None,
+    new_sl: float | None = None,
+    latest_tick_time: str | None = None,
+) -> dict:
+    payload: dict[str, Any] = {"conditions_met": _dump_json(conditions_state)}
+    if new_status:
+        payload["status"] = new_status
+    if new_sl is not None:
+        payload["sl"] = round(safe_float(new_sl, safe_float(signal_row.get("sl"), 0)), 5)
+    if latest_tick_time:
+        conditions_state["last_tick_checked_at"] = latest_tick_time
+        payload["conditions_met"] = _dump_json(conditions_state)
+
+    supabase.table("signals").update(payload).eq("id", signal_row.get("id")).execute()
+    updated = dict(signal_row)
+    updated.update(payload)
+    updated["conditions_met"] = conditions_state
+    return updated
+
+
+def check_engine_runtime_health(latest_tick: dict, market_clock: dict) -> None:
+    if not market_clock.get("market_open"):
+        return
+
+    last_completed = _latest_completed_decision_run()
+    if not last_completed:
+        return
+
+    last_run_at = parse_dt(last_completed.get("created_at"))
+    tick_ref = parse_dt(latest_tick.get("provider_ts")) or parse_dt(latest_tick.get("created_at"))
+    if not last_run_at or not tick_ref:
+        return
+
+    run_age_minutes = max(0, int((datetime.now(timezone.utc) - last_run_at).total_seconds() // 60))
+    tick_age_minutes = max(0, int((datetime.now(timezone.utc) - tick_ref).total_seconds() // 60))
+    if run_age_minutes < ENGINE_STALE_ALERT_MINUTES:
+        return
+
+    alert_kind = "ENGINE_OUTAGE" if tick_age_minutes <= ENGINE_STALE_ALERT_MINUTES else "PIPELINE_STALE"
+    alert_text = (
+        f"XAUradar runtime alert | {alert_kind}\n"
+        f"Last completed engine run: {last_run_at.isoformat()}\n"
+        f"Latest tick age: {tick_age_minutes}m\n"
+        f"Run age: {run_age_minutes}m"
+    )
+    if send_operational_alert(
+        alert_kind,
+        alert_text,
+        meta={"run_age_minutes": run_age_minutes, "tick_age_minutes": tick_age_minutes},
+    ):
+        print(f"  ALERT: runtime health issue detected ({alert_kind})")
 
 
 def check_market_tick_freshness(warn_minutes: int = 10, alert_minutes: int = 15) -> dict:
@@ -792,7 +1217,12 @@ def _apply_account_pnl_deltas(pnl_by_user: dict[str, float], now_iso: str) -> No
             print(f"  WARNING: demo account settlement failed for user {user_id}: {e}")
 
 
-def apply_demo_tp1_partial(signal_row: dict, tp1_price: float, now_iso: str | None = None) -> int:
+def apply_demo_tp1_partial(
+    signal_row: dict,
+    tp1_price: float,
+    now_iso: str | None = None,
+    source_tick_time: str | None = None,
+) -> int:
     signal_id = signal_row.get("id")
     if not signal_id:
         return 0
@@ -863,19 +1293,29 @@ def apply_demo_tp1_partial(signal_row: dict, tp1_price: float, now_iso: str | No
             "metadata": metadata,
         }
         try:
-            updated = (
-                supabase.table("demo_trades")
-                .update(update_payload)
-                .eq("id", trade_id)
-                .eq("status", "OPEN")
-                .select("id")
-                .execute()
+            tp1_event_key = _build_event_key(signal_id, "TP1_PARTIAL", source_tick_time or now_iso, suffix=str(trade_id))
+            be_event_key = _build_event_key(signal_id, "SL_TO_BREAKEVEN", source_tick_time or now_iso, suffix=str(trade_id))
+            partial_persisted, _ = _persist_demo_trade_update(
+                trade_id=trade_id,
+                signal_id=signal_id,
+                status="TP1_PARTIAL",
+                update_payload=update_payload,
+                verifier=lambda row: (
+                    str(row.get("status", "")).upper() == "OPEN"
+                    and abs(safe_float(row.get("position_size"), -1) - round(remaining_after, 6)) <= 1e-6
+                    and abs(
+                        safe_float(parse_json_object(row.get("metadata")).get("remaining_position_size"), -1)
+                        - round(remaining_after, 6)
+                    )
+                    <= 1e-6
+                    and bool(parse_json_object(row.get("metadata")).get("tp1_partial_done"))
+                ),
             )
-            if updated.data:
+            if partial_persisted:
                 partial_count += 1
                 if user_id:
                     pnl_by_user[user_id] = safe_float(pnl_by_user.get(user_id), 0) + pnl_usd_partial
-                record_demo_trade_event(
+                tp1_event_written = record_demo_trade_event(
                     trade_id=trade_id,
                     signal_id=signal_id,
                     user_id=user_id,
@@ -888,8 +1328,9 @@ def apply_demo_tp1_partial(signal_row: dict, tp1_price: float, now_iso: str | No
                     pnl_r=pnl_r_partial,
                     pnl_pips=pnl_pips_partial,
                     meta={"fraction": tp1_fraction},
+                    event_key=tp1_event_key,
                 )
-                record_demo_trade_event(
+                be_event_written = record_demo_trade_event(
                     trade_id=trade_id,
                     signal_id=signal_id,
                     user_id=user_id,
@@ -902,9 +1343,40 @@ def apply_demo_tp1_partial(signal_row: dict, tp1_price: float, now_iso: str | No
                     pnl_r=0.0,
                     pnl_pips=0.0,
                     meta={"new_sl": round(safe_float(signal_row.get("sl"), entry), 5)},
+                    event_key=be_event_key,
                 )
+                if not tp1_event_written:
+                    _log_demo_settlement_issue(
+                        "TP1_EVENT_INSERT",
+                        signal_id=signal_id,
+                        trade_id=trade_id,
+                        status="TP1_PARTIAL",
+                        payload={"event_key": tp1_event_key, "tp1_price": round(tp1_price, 5)},
+                        extra={"event_type": "TP1_PARTIAL"},
+                    )
+                if not be_event_written:
+                    _log_demo_settlement_issue(
+                        "TP1_EVENT_INSERT",
+                        signal_id=signal_id,
+                        trade_id=trade_id,
+                        status="SL_TO_BREAKEVEN",
+                        payload={"event_key": be_event_key, "breakeven_sl": round(safe_float(signal_row.get("sl"), entry), 5)},
+                        extra={"event_type": "SL_TO_BREAKEVEN"},
+                    )
         except Exception as e:
-            print(f"  WARNING: demo TP1 partial update failed for {trade_id}: {e}")
+            _log_demo_settlement_issue(
+                "TP1_UPDATE",
+                signal_id=signal_id,
+                trade_id=trade_id,
+                status="TP1_PARTIAL",
+                payload={
+                    "update_payload": update_payload,
+                    "tp1_price": round(tp1_price, 5),
+                    "remaining_after": round(remaining_after, 6),
+                    "partial_size": round(partial_size, 6),
+                },
+                error=e,
+            )
 
     if pnl_by_user:
         _apply_account_pnl_deltas(pnl_by_user, now_iso)
@@ -1069,6 +1541,7 @@ def create_demo_trades_for_signal(signal_row: dict) -> None:
                 pnl_r=0.0,
                 pnl_pips=0.0,
                 meta={"side": side},
+                event_key=_build_event_key(signal_id, "OPEN", now_iso, suffix=str(inserted_trade.get("id") if inserted_trade else user_id)),
             )
         except Exception as e:
             failed += 1
@@ -1131,13 +1604,18 @@ def reconcile_demo_trades_for_closed_signals(current_price: float) -> None:
         settle_demo_trades_for_signal(signal_row, signal_status, current_price)
 
 
-def settle_demo_trades_for_signal(signal_row: dict, closed_status: str, current_price: float) -> None:
+def settle_demo_trades_for_signal(
+    signal_row: dict,
+    closed_status: str,
+    current_price: float,
+    source_tick_time: str | None = None,
+) -> dict[str, Any]:
     if closed_status not in SIGNAL_STATUS_CLOSED:
-        return
+        return {"closed_count": 0, "failed_count": 0, "signal_id": signal_row.get("id"), "trade_ids": []}
 
     signal_id = signal_row.get("id")
     if not signal_id:
-        return
+        return {"closed_count": 0, "failed_count": 0, "signal_id": None, "trade_ids": []}
 
     try:
         open_resp = (
@@ -1149,11 +1627,17 @@ def settle_demo_trades_for_signal(signal_row: dict, closed_status: str, current_
         )
         open_trades = open_resp.data or []
     except Exception as e:
-        print(f"  WARNING: open demo trade fetch failed: {e}")
-        return
+        _log_demo_settlement_issue(
+            "FETCH_OPEN_TRADES",
+            signal_id=signal_id,
+            status=closed_status,
+            payload={"current_price": round(current_price, 5)},
+            error=e,
+        )
+        return {"closed_count": 0, "failed_count": 1, "signal_id": signal_id, "trade_ids": []}
 
     if not open_trades:
-        return
+        return {"closed_count": 0, "failed_count": 0, "signal_id": signal_id, "trade_ids": []}
 
     close_price_map = {
         "HIT_TP1": safe_float(signal_row.get("tp1"), current_price),
@@ -1178,7 +1662,7 @@ def settle_demo_trades_for_signal(signal_row: dict, closed_status: str, current_
     if closed_status in ("HIT_TP2", "HIT_TP3"):
         try:
             tp1_price = safe_float(signal_row.get("tp1"), close_price)
-            partial_count = apply_demo_tp1_partial(signal_row, tp1_price, now_iso=now_iso)
+            partial_count = apply_demo_tp1_partial(signal_row, tp1_price, now_iso=now_iso, source_tick_time=source_tick_time)
             if partial_count > 0:
                 print(f"  Demo TP1 partial fills: {partial_count}")
                 try:
@@ -1191,13 +1675,27 @@ def settle_demo_trades_for_signal(signal_row: dict, closed_status: str, current_
                     )
                     open_trades = refresh_resp.data or []
                 except Exception as refresh_err:
-                    print(f"  WARNING: post-TP1 refresh failed, skipping final settlement this run: {refresh_err}")
-                    return
+                    _log_demo_settlement_issue(
+                        "POST_TP1_REFRESH",
+                        signal_id=signal_id,
+                        status=closed_status,
+                        payload={"close_price": round(close_price, 5), "tp1_price": round(tp1_price, 5)},
+                        error=refresh_err,
+                    )
+                    return {"closed_count": 0, "failed_count": 1, "signal_id": signal_id, "trade_ids": []}
         except Exception as e:
-            print(f"  WARNING: pre-close TP1 partial processing failed: {e}")
+            _log_demo_settlement_issue(
+                "PRE_CLOSE_TP1",
+                signal_id=signal_id,
+                status=closed_status,
+                payload={"close_price": round(close_price, 5)},
+                error=e,
+            )
 
     pnl_by_user_final: dict[str, float] = {}
     closed_count = 0
+    failed_count = 0
+    closed_trade_ids: list[str] = []
     for trade in open_trades:
         trade_id = trade.get("id")
         user_id = trade.get("user_id")
@@ -1242,17 +1740,24 @@ def settle_demo_trades_for_signal(signal_row: dict, closed_status: str, current_
         }
 
         try:
-            update_resp = (
-                supabase.table("demo_trades")
-                .update(update_row)
-                .eq("id", trade_id)
-                .eq("status", "OPEN")
-                .select("id")
-                .execute()
+            trade_persisted, _ = _persist_demo_trade_update(
+                trade_id=trade_id,
+                signal_id=signal_id,
+                status=closed_status,
+                update_payload=update_row,
+                verifier=lambda row: (
+                    str(row.get("status", "")).upper() == trade_status
+                    and str(row.get("close_reason") or "") == closed_status
+                    and abs(safe_float(row.get("position_size"), -1)) <= 1e-6
+                    and abs(
+                        safe_float(parse_json_object(row.get("metadata")).get("remaining_position_size"), -1)
+                    )
+                    <= 1e-6
+                ),
             )
-            updated_rows = update_resp.data or []
-            if updated_rows:
+            if trade_persisted:
                 closed_count += 1
+                closed_trade_ids.append(str(trade_id))
                 if user_id:
                     pnl_by_user_final[user_id] = safe_float(pnl_by_user_final.get(user_id), 0) + pnl_usd_final
                 event_type = {
@@ -1263,7 +1768,7 @@ def settle_demo_trades_for_signal(signal_row: dict, closed_status: str, current_
                     "EXPIRED": "EXPIRED",
                     "HIT_TP1": "TP1_PARTIAL",
                 }.get(closed_status, "EXPIRED")
-                record_demo_trade_event(
+                event_written = record_demo_trade_event(
                     trade_id=trade_id,
                     signal_id=signal_id,
                     user_id=user_id,
@@ -1281,15 +1786,39 @@ def settle_demo_trades_for_signal(signal_row: dict, closed_status: str, current_
                         "total_pnl_r": round(pnl_r_total, 6),
                         "total_pnl_pips": round(pnl_pips_total, 6),
                     },
+                    event_key=_build_event_key(signal_id, event_type, source_tick_time or now_iso, suffix=str(trade_id)),
                 )
+                if not event_written:
+                    _log_demo_settlement_issue(
+                        "FINAL_EVENT_INSERT",
+                        signal_id=signal_id,
+                        trade_id=trade_id,
+                        status=closed_status,
+                        payload={"event_type": event_type, "close_price": round(close_price, 5)},
+                        extra={"event_type": event_type},
+                    )
         except Exception as e:
-            print(f"  WARNING: demo trade close failed for {trade_id}: {e}")
+            failed_count += 1
+            _log_demo_settlement_issue(
+                "FINAL_CLOSE_UPDATE",
+                signal_id=signal_id,
+                trade_id=trade_id,
+                status=closed_status,
+                payload={"update_payload": update_row, "close_price": round(close_price, 5)},
+                error=e,
+            )
 
     if pnl_by_user_final:
         _apply_account_pnl_deltas(pnl_by_user_final, now_iso)
 
     if closed_count > 0:
         print(f"  Demo trades settled: {closed_count} ({closed_status})")
+    return {
+        "closed_count": closed_count,
+        "failed_count": failed_count,
+        "signal_id": signal_id,
+        "trade_ids": closed_trade_ids,
+    }
 
 
 def get_asian_range(df_m15: pd.DataFrame) -> dict | None:
@@ -1598,99 +2127,158 @@ def check_active_signal() -> dict | None:
     return active.get("intraday") or active.get("swing")
 
 
-def manage_active_signal(active: dict, current_price: float) -> dict:
-    kind = active.get("type")
-    status = active.get("status", "ACTIVE")
-    rr_value = safe_float(active.get("rr_value"), 0)
-    tp1, tp2, tp3, sl = safe_float(active.get("tp1")), safe_float(active.get("tp2")), safe_float(active.get("tp3")), safe_float(active.get("sl"))
-    entry = safe_float(active.get("entry_price"), 0)
-    conditions_state = parse_json_object(active.get("conditions_met"))
-    tp1_be_applied = bool(conditions_state.get("tp1_be_applied"))
-    next_status = status
-    update_payload: dict[str, Any] = {}
-    tp1_partial_event = False
+def reconcile_active_signal_from_ticks(signal_row: dict, ticks_since_last_check: list[dict]) -> dict:
+    updated_signal = dict(signal_row)
+    status = str(signal_row.get("status", "ACTIVE")).upper()
+    rr_value = safe_float(signal_row.get("rr_value"), 0)
+    conditions_state = initialize_execution_state(signal_row)
+    latest_tick_time = ticks_since_last_check[-1].get("tick_time") if ticks_since_last_check else conditions_state.get("last_tick_checked_at")
+
+    if status != "ACTIVE":
+        return updated_signal
 
     # Cleanup guard for legacy rows created before strict RR>=2 policy.
-    if status == "ACTIVE" and 0 < rr_value < 2.0:
-        next_status = "EXPIRED"
+    if 0 < rr_value < 2.0:
         conditions_state["legacy_rr_cleanup"] = True
         conditions_state["legacy_rr_value"] = rr_value
-        update_payload["conditions_met"] = json.dumps(conditions_state)
+        conditions_state["last_tick_checked_at"] = latest_tick_time
+        return update_signal_execution_state(
+            signal_row,
+            conditions_state,
+            new_status="EXPIRED",
+            latest_tick_time=latest_tick_time,
+        )
 
-    if kind == "BUY":
-        if current_price <= sl:
-            next_status = "BREAKEVEN" if (tp1_be_applied and abs(sl - entry) <= 0.011) else "HIT_SL"
-        elif current_price >= tp3:
-            next_status = "HIT_TP3"
-        elif current_price >= tp2 and status not in ("HIT_TP2", "HIT_TP3"):
-            next_status = "HIT_TP2"
-        elif current_price >= tp1 and not tp1_be_applied and entry > 0:
-            update_payload["sl"] = round(entry, 5)
-            conditions_state["tp1_be_applied"] = True
-            conditions_state["tp1_be_at"] = datetime.now(timezone.utc).isoformat()
-            update_payload["conditions_met"] = json.dumps(conditions_state)
-            tp1_partial_event = True
-    elif kind == "SELL":
-        if current_price >= sl:
-            next_status = "BREAKEVEN" if (tp1_be_applied and abs(sl - entry) <= 0.011) else "HIT_SL"
-        elif current_price <= tp3:
-            next_status = "HIT_TP3"
-        elif current_price <= tp2 and status not in ("HIT_TP2", "HIT_TP3"):
-            next_status = "HIT_TP2"
-        elif current_price <= tp1 and not tp1_be_applied and entry > 0:
-            update_payload["sl"] = round(entry, 5)
-            conditions_state["tp1_be_applied"] = True
-            conditions_state["tp1_be_at"] = datetime.now(timezone.utc).isoformat()
-            update_payload["conditions_met"] = json.dumps(conditions_state)
-            tp1_partial_event = True
+    crossing = evaluate_signal_crossings(signal_row, ticks_since_last_check)
+    conditions_state = crossing["conditions"]
+    latest_tick_time = crossing["latest_tick_time"] or latest_tick_time
+    partial_tick = crossing["partial_tick"]
+    final_status = crossing["final_status"]
+    final_tick = crossing["final_tick"]
 
-    created = parse_dt(active.get("created_at"))
-    if created and datetime.now(timezone.utc) - created > timedelta(hours=6) and next_status == "ACTIVE":
-        next_status = "EXPIRED"
+    if partial_tick:
+        tp1_price = safe_float(signal_row.get("tp1"), safe_float(partial_tick.get("price"), 0))
+        conditions_state["tp1_be_applied"] = True
+        conditions_state["tp1_hit_at"] = partial_tick.get("tick_time")
+        conditions_state["last_event_seq"] = int(conditions_state.get("last_event_seq") or 0) + 1
+        updated_signal = update_signal_execution_state(
+            updated_signal,
+            conditions_state,
+            new_sl=safe_float(signal_row.get("entry_price"), safe_float(signal_row.get("sl"), 0)),
+            latest_tick_time=latest_tick_time,
+        )
+        partial_count = apply_demo_tp1_partial(
+            updated_signal,
+            tp1_price,
+            source_tick_time=partial_tick.get("tick_time"),
+        )
+        if partial_count > 0:
+            notify_signal_event(
+                updated_signal,
+                "TP1",
+                "TP1_HIT_AND_SL_MOVED_TO_BREAKEVEN",
+                event_price=tp1_price,
+                meta={"source_tick_time": partial_tick.get("tick_time")},
+                event_key=_build_event_key(signal_row.get("id"), "TP1", partial_tick.get("tick_time")),
+            )
+            print(f"  TP1 management: partial fill applied at {tp1_price:.2f}")
 
-    updated_signal = dict(active)
-    if next_status != status or update_payload:
-        try:
-            payload = dict(update_payload)
-            if next_status != status:
-                payload["status"] = next_status
-            supabase.table("signals").update(payload).eq("id", active.get("id")).execute()
-            updated_signal.update(update_payload)
-            if next_status != status:
-                updated_signal["status"] = next_status
-                update_daily_risk_from_close(active, next_status)
-                settle_demo_trades_for_signal(active, next_status, current_price)
-                notify_signal_event(
-                    updated_signal,
-                    {
-                        "HIT_TP2": "TP2",
-                        "HIT_TP3": "TP3",
-                        "HIT_SL": "STOP_LOSS",
-                        "BREAKEVEN": "BREAKEVEN",
-                        "EXPIRED": "EXPIRED",
-                    }.get(next_status, next_status),
-                    next_status,
-                    event_price=current_price,
-                )
-                print(f"  Active signal updated: {status} -> {next_status}")
-            elif update_payload.get("sl") is not None:
-                if tp1_partial_event:
-                    signal_for_demo = dict(active)
-                    signal_for_demo["sl"] = update_payload.get("sl", active.get("sl"))
-                    partial_count = apply_demo_tp1_partial(signal_for_demo, tp1)
-                    if partial_count > 0:
-                        print(f"  Demo TP1 partial fills: {partial_count}")
-                    updated_signal["sl"] = update_payload.get("sl", active.get("sl"))
-                    updated_signal["conditions_met"] = parse_json_object(update_payload.get("conditions_met"))
-                    notify_signal_event(
-                        updated_signal,
-                        "TP1",
-                        "TP1_HIT_AND_SL_MOVED_TO_BREAKEVEN",
-                        event_price=tp1,
-                    )
-                print(f"  TP1 management: moved SL to breakeven at {update_payload['sl']}")
-        except Exception as e:
-            print(f"  WARNING: active signal update failed: {e}")
+    if final_status:
+        conditions_state = initialize_execution_state(updated_signal)
+        conditions_state["last_event_seq"] = int(conditions_state.get("last_event_seq") or 0) + 1
+        updated_signal = update_signal_execution_state(
+            updated_signal,
+            conditions_state,
+            new_status=final_status,
+            latest_tick_time=latest_tick_time,
+        )
+        update_daily_risk_from_close(signal_row, final_status)
+        event_price = safe_float(
+            {
+                "HIT_TP2": updated_signal.get("tp2"),
+                "HIT_TP3": updated_signal.get("tp3"),
+                "HIT_SL": updated_signal.get("sl"),
+                "BREAKEVEN": updated_signal.get("sl"),
+                "EXPIRED": final_tick.get("price") if final_tick else updated_signal.get("entry_price"),
+            }.get(final_status),
+            safe_float(final_tick.get("price") if final_tick else updated_signal.get("entry_price"), 0),
+        )
+        settlement_result = settle_demo_trades_for_signal(
+            updated_signal,
+            final_status,
+            event_price,
+            source_tick_time=(final_tick or {}).get("tick_time"),
+        )
+        notified = notify_signal_event(
+            updated_signal,
+            {
+                "HIT_TP2": "TP2",
+                "HIT_TP3": "TP3",
+                "HIT_SL": "STOP_LOSS",
+                "BREAKEVEN": "BREAKEVEN",
+                "EXPIRED": "EXPIRED",
+            }.get(final_status, final_status),
+            final_status,
+            event_price=event_price,
+            meta={"source_tick_time": (final_tick or {}).get("tick_time")},
+            event_key=_build_event_key(signal_row.get("id"), final_status, (final_tick or {}).get("tick_time")),
+        )
+        if notified and settlement_result.get("failed_count", 0) > 0:
+            print(
+                "  WARNING: signal notification sent while demo settlement failed "
+                f"(signal_id={signal_row.get('id')} status={final_status} failed={settlement_result.get('failed_count', 0)})"
+            )
+            record_engine_runtime_event(
+                "DEMO_SETTLEMENT_DIVERGENCE",
+                meta={
+                    "signal_id": signal_row.get("id"),
+                    "status": final_status,
+                    "failed_count": settlement_result.get("failed_count", 0),
+                    "trade_ids": settlement_result.get("trade_ids", []),
+                },
+            )
+        print(f"  Active signal updated: ACTIVE -> {final_status}")
+        return updated_signal
+
+    created = parse_dt(signal_row.get("created_at"))
+    if created and datetime.now(timezone.utc) - created > timedelta(hours=SIGNAL_EXPIRY_HOURS):
+        conditions_state["last_event_seq"] = int(conditions_state.get("last_event_seq") or 0) + 1
+        updated_signal = update_signal_execution_state(
+            updated_signal,
+            conditions_state,
+            new_status="EXPIRED",
+            latest_tick_time=latest_tick_time,
+        )
+        expire_price = safe_float(ticks_since_last_check[-1].get("price"), safe_float(updated_signal.get("entry_price"), 0)) if ticks_since_last_check else safe_float(updated_signal.get("entry_price"), 0)
+        settlement_result = settle_demo_trades_for_signal(updated_signal, "EXPIRED", expire_price, source_tick_time=latest_tick_time)
+        notified = notify_signal_event(
+            updated_signal,
+            "EXPIRED",
+            "EXPIRED",
+            event_price=expire_price,
+            meta={"source_tick_time": latest_tick_time},
+            event_key=_build_event_key(signal_row.get("id"), "EXPIRED", latest_tick_time),
+        )
+        if notified and settlement_result.get("failed_count", 0) > 0:
+            print(
+                "  WARNING: signal notification sent while demo settlement failed "
+                f"(signal_id={signal_row.get('id')} status=EXPIRED failed={settlement_result.get('failed_count', 0)})"
+            )
+            record_engine_runtime_event(
+                "DEMO_SETTLEMENT_DIVERGENCE",
+                meta={
+                    "signal_id": signal_row.get("id"),
+                    "status": "EXPIRED",
+                    "failed_count": settlement_result.get("failed_count", 0),
+                    "trade_ids": settlement_result.get("trade_ids", []),
+                },
+            )
+        print("  Active signal updated: ACTIVE -> EXPIRED")
+        return updated_signal
+
+    if latest_tick_time:
+        conditions_state["last_tick_checked_at"] = latest_tick_time
+        updated_signal = update_signal_execution_state(updated_signal, conditions_state, latest_tick_time=latest_tick_time)
     return updated_signal
 
 
@@ -1722,57 +2310,21 @@ def insert_signal(payload: dict) -> dict | None:
         return None
 
 
-def run_signal_engine() -> None:
-    print(f"\\n{'=' * 62}")
-    print(f"Signal Engine v2 - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    print(f"{'=' * 62}")
-
-    market_clock = get_market_clock_context()
-    active_by_lane = check_active_signals_by_lane()
-    sync_demo_trades_for_active_signals(active_by_lane)
-    if not market_clock["market_open"]:
-        print(f"  Market closed ({market_clock['reason']}): skipping candle fetch, signal generation, and signal expiry checks.")
-        return
-    check_market_tick_freshness(warn_minutes=10, alert_minutes=15)
-
-    df_m15 = fetch_candles("XAU/USD", 15, "minute")
-    df_h1 = fetch_candles("XAU/USD", 1, "hour")
-    df_h4 = fetch_candles("XAU/USD", 4, "hour")
-    if df_m15 is None or df_h1 is None or df_h4 is None:
-        print("  ERROR: missing candle set")
-        return
-    if len(df_m15) < 120 or len(df_h1) < 120 or len(df_h4) < 120:
-        print("  ERROR: insufficient bars")
-        return
-
-    df_m15 = calculate_trigger_indicators(df_m15)
-    df_h1 = calculate_trigger_indicators(df_h1)
-    df_h4 = calculate_trigger_indicators(df_h4)
-    df_h1 = calculate_confirm_indicators(df_h1)
-    df_h4 = calculate_confirm_indicators(df_h4)
-
-    current_price = safe_float(df_m15.iloc[-1]["Close"], 0)
-    reconcile_demo_trades_for_closed_signals(current_price)
-    spread_info = fetch_latest_spread()
-    dxy = fetch_dxy_quote()
-    session = get_session_context()
-    news = get_news_context()
-    asian_range = get_asian_range(df_m15)
-    exp50 = rolling_expectancy(50)
-    state = get_or_create_daily_risk()
-    allow, allow_reason = risk_allow(state)
-
-    print(f"  Price: {current_price:.2f} | Spread: {spread_info.get('spread')} | Session: {session['name']}")
-    print(f"  News(high={news['high_blackout']}, medium={news['medium_penalty']}) | Expectancy50={exp50:.3f} | Adaptive exits ON")
-
-    for lane_name, active_signal in list(active_by_lane.items()):
-        updated_signal = manage_active_signal(active_signal, current_price)
-        if str(updated_signal.get("status", "")).upper() == "ACTIVE":
-            active_by_lane[lane_name] = updated_signal
-            create_demo_trades_for_signal(updated_signal)
-        else:
-            active_by_lane.pop(lane_name, None)
-
+def generate_new_candidates(
+    active_by_lane: dict[str, dict],
+    current_price: float,
+    df_m15: pd.DataFrame,
+    df_h1: pd.DataFrame,
+    df_h4: pd.DataFrame,
+    spread_info: dict,
+    dxy: dict | None,
+    session: dict,
+    news: dict,
+    asian_range: dict | None,
+    state: dict,
+    allow: bool,
+    allow_reason: str,
+) -> tuple[dict[str, dict], bool]:
     candidates = []
     candidates_by_lane: dict[str, list[dict]] = {lane_name: [] for lane_name in LANE_ORDER}
     degrade_mode_active = False
@@ -1804,6 +2356,7 @@ def run_signal_engine() -> None:
             candidates_by_lane[lane.name].append(candidate)
 
     candidates.sort(key=lambda x: x["score_total"], reverse=True)
+
     def payload_from(candidate: dict, why: str) -> dict:
         runtime = _candidate_ui_payload(candidate, "ACTIVE", why)
         return {
@@ -1867,7 +2420,14 @@ def run_signal_engine() -> None:
                 if inserted:
                     print(f"  Signal stored: {best_pass['type']} {best_pass['lane'].upper()} | score={best_pass['score_total']}")
                     create_demo_trades_for_signal(inserted | {"status": "ACTIVE"})
-                    notify_signal_event(inserted, "NEW_SIGNAL", reason, event_price=safe_float(inserted.get("entry_price"), 0))
+                    notify_signal_event(
+                        inserted,
+                        "NEW_SIGNAL",
+                        reason,
+                        event_price=safe_float(inserted.get("entry_price"), 0),
+                        meta={"created_at": inserted.get("created_at")},
+                        event_key=_build_event_key(inserted.get("id"), "NEW_SIGNAL", inserted.get("created_at")),
+                    )
                     active_by_lane[lane_name] = inserted
                     decision_state = "ACTIVE"
                     selected_payload = _signal_ui_payload(inserted, decision_state, reason)
@@ -1912,16 +2472,111 @@ def run_signal_engine() -> None:
             indent=2,
         )
     )
+
     insert_decision_run(
         market_price=current_price,
         lane_payloads=lane_decisions,
         meta={
+            "run_stage": "COMPLETED",
             "session": session,
             "news": news,
             "spread": spread_info,
             "degrade_mode": degrade_mode_active,
             "risk_state": state,
+            "dxy_price": safe_float((dxy or {}).get("price"), 0),
         },
+    )
+    return lane_decisions, degrade_mode_active
+
+
+def run_signal_engine() -> None:
+    print(f"\\n{'=' * 62}")
+    print(f"Signal Engine v2 - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"{'=' * 62}")
+
+    market_clock = get_market_clock_context()
+    active_by_lane = check_active_signals_by_lane()
+    sync_demo_trades_for_active_signals(active_by_lane)
+    record_engine_runtime_event("STARTED", meta={"market_clock": market_clock, "active_lanes": list(active_by_lane.keys())})
+    if not market_clock["market_open"]:
+        print(f"  Market closed ({market_clock['reason']}): skipping candle fetch, signal generation, and signal expiry checks.")
+        record_engine_runtime_event("ABORTED", meta={"reason": market_clock["reason"], "market_clock": market_clock})
+        return
+
+    spread_info = fetch_latest_spread()
+    latest_tick = fetch_latest_tick()
+    check_market_tick_freshness(warn_minutes=10, alert_minutes=15)
+    check_engine_runtime_health(latest_tick, market_clock)
+
+    if safe_float(latest_tick.get("mid"), safe_float(latest_tick.get("price"), 0)) > 0:
+        print(
+            f"  Active-trade monitor price: {safe_float(latest_tick.get('mid'), safe_float(latest_tick.get('price'), 0)):.2f} "
+            f"(bid={safe_float(latest_tick.get('bid'), 0):.2f}, ask={safe_float(latest_tick.get('ask'), 0):.2f}, src={latest_tick.get('source')})"
+        )
+        for lane_name, active_signal in list(active_by_lane.items()):
+            ticks_since_last_check = fetch_market_ticks_for_signal(active_signal)
+            updated_signal = reconcile_active_signal_from_ticks(active_signal, ticks_since_last_check)
+            if str(updated_signal.get("status", "")).upper() == "ACTIVE":
+                active_by_lane[lane_name] = updated_signal
+                create_demo_trades_for_signal(updated_signal)
+            else:
+                active_by_lane.pop(lane_name, None)
+    else:
+        print("  WARNING: no valid market_ticks price for active-trade monitoring this run.")
+
+    df_m15 = fetch_candles("XAU/USD", 15, "minute")
+    df_h1 = fetch_candles("XAU/USD", 1, "hour")
+    df_h4 = fetch_candles("XAU/USD", 4, "hour")
+    if df_m15 is None or df_h1 is None or df_h4 is None:
+        print("  ERROR: missing candle set")
+        record_engine_runtime_event(
+            "ABORTED",
+            market_price=safe_float(latest_tick.get("price"), 0),
+            meta={"reason": "MISSING_CANDLES", "latest_tick_time": latest_tick.get("provider_ts") or latest_tick.get("created_at")},
+        )
+        return
+    if len(df_m15) < 120 or len(df_h1) < 120 or len(df_h4) < 120:
+        print("  ERROR: insufficient bars")
+        record_engine_runtime_event(
+            "ABORTED",
+            market_price=safe_float(latest_tick.get("price"), 0),
+            meta={"reason": "INSUFFICIENT_BARS", "latest_tick_time": latest_tick.get("provider_ts") or latest_tick.get("created_at")},
+        )
+        return
+
+    df_m15 = calculate_trigger_indicators(df_m15)
+    df_h1 = calculate_trigger_indicators(df_h1)
+    df_h4 = calculate_trigger_indicators(df_h4)
+    df_h1 = calculate_confirm_indicators(df_h1)
+    df_h4 = calculate_confirm_indicators(df_h4)
+
+    current_price = safe_float(df_m15.iloc[-1]["Close"], 0)
+    reconcile_demo_trades_for_closed_signals(current_price)
+    dxy = fetch_dxy_quote()
+    session = get_session_context()
+    news = get_news_context()
+    asian_range = get_asian_range(df_m15)
+    exp50 = rolling_expectancy(50)
+    state = get_or_create_daily_risk()
+    allow, allow_reason = risk_allow(state)
+
+    print(f"  Price: {current_price:.2f} | Spread: {spread_info.get('spread')} | Session: {session['name']}")
+    print(f"  News(high={news['high_blackout']}, medium={news['medium_penalty']}) | Expectancy50={exp50:.3f} | Adaptive exits ON")
+
+    lane_decisions, degrade_mode_active = generate_new_candidates(
+        active_by_lane=active_by_lane,
+        current_price=current_price,
+        df_m15=df_m15,
+        df_h1=df_h1,
+        df_h4=df_h4,
+        spread_info=spread_info,
+        dxy=dxy,
+        session=session,
+        news=news,
+        asian_range=asian_range,
+        state=state,
+        allow=allow,
+        allow_reason=allow_reason,
     )
 
     # Snapshot write (still useful for UI)

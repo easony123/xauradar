@@ -126,6 +126,14 @@ function buildDemoPerformance(account, trades = [], equityPoints = [], events = 
   const starting = parseNumber(account.starting_capital, 100000);
   const balance = parseNumber(account.balance, starting);
   const liveMarkPrice = parseNumber(livePrice, NaN);
+  const normalizedEvents = (Array.isArray(events) ? events : []).map((evt) => ({
+    ...evt,
+    event_type: normalizeSignalStatus(evt.event_type),
+    meta: parseTradeMetadata(evt.meta),
+    realized_size: parseNumber(evt.realized_size, 0),
+    remaining_size: parseNumber(evt.remaining_size, 0),
+    pnl_usd: parseNumber(evt.pnl_usd, 0),
+  }));
 
   const normalizedTrades = (Array.isArray(trades) ? trades : []).map((trade) => {
     const metadata = parseTradeMetadata(trade.metadata);
@@ -184,6 +192,15 @@ function buildDemoPerformance(account, trades = [], equityPoints = [], events = 
   const expectancyR = totalClosed > 0
     ? closedTrades.reduce((acc, trade) => acc + parseNumber(trade.pnl_r, 0), 0) / totalClosed
     : 0;
+  const tp1Signals = new Set(
+    normalizedEvents
+      .filter((evt) => evt.event_type === 'TP1_PARTIAL')
+      .map((evt) => evt.signal_id || evt.trade_id)
+      .filter(Boolean),
+  );
+  wins.forEach((trade) => {
+    if (trade.signal_id) tp1Signals.add(trade.signal_id);
+  });
 
   const basePoints = Array.isArray(equityPoints)
     ? equityPoints.map((point) => ({
@@ -234,6 +251,7 @@ function buildDemoPerformance(account, trades = [], equityPoints = [], events = 
     wins: wins.length,
     losses: losses.length,
     winRate,
+    tp1Hits: tp1Signals.size,
     pnlTotal,
     closedPnlTotal,
     unrealizedPnlTotal,
@@ -243,7 +261,7 @@ function buildDemoPerformance(account, trades = [], equityPoints = [], events = 
     equityPointsBase: basePoints,
     equityPoints: points,
     trades: normalizedTrades,
-    events: Array.isArray(events) ? events : [],
+    events: normalizedEvents,
     effectiveOpenTrades,
   };
 }
@@ -1156,10 +1174,12 @@ async function fetchLatestDecisionRun() {
       .from('signal_decision_runs')
       .select('*')
       .order('created_at', { ascending: false })
-      .limit(1);
+      .limit(10);
 
     if (error) throw error;
-    return data && data.length > 0 ? normalizeDecisionRun(data[0]) : null;
+    const rows = data || [];
+    const completed = rows.find((row) => String(tryParseJson(row.meta)?.run_stage || 'COMPLETED').toUpperCase() === 'COMPLETED');
+    return completed ? normalizeDecisionRun(completed) : (rows.length > 0 ? normalizeDecisionRun(rows[0]) : null);
   } catch (err) {
     console.error('Decision run fetch error:', err.message);
     return null;
@@ -1260,6 +1280,11 @@ async function fetchPerformanceStats() {
     const realizedRows = tradableRows.filter((row) => realizedStatuses.includes(normalizeSignalStatus(row.status)));
     const winRows = realizedRows.filter((row) => isWinningSignalStatus(row.status));
     const lossRows = realizedRows.filter((row) => normalizeSignalStatus(row.status) === 'HIT_SL');
+    const tp1SignalCount = tradableRows.filter((row) => {
+      const status = normalizeSignalStatus(row.status);
+      if (['HIT_TP1', 'HIT_TP2', 'HIT_TP3'].includes(status)) return true;
+      return Boolean(tryParseJson(row.conditions_met)?.tp1_hit_at);
+    }).length;
 
     const mapStatusR = (status) => {
       const normalized = normalizeSignalStatus(status);
@@ -1360,7 +1385,7 @@ async function fetchPerformanceStats() {
       expectancy: overall.expectancy.toFixed(2),
       avgRR: overall.avgRR.toFixed(2),
       drawdown: overall.drawdown.toFixed(2),
-      tp1Hits: overall.tp1,
+      tp1Hits: tp1SignalCount,
       tp2Hits: overall.tp2,
       tp3Hits: overall.tp3,
       slHits: overall.sl,
