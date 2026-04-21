@@ -52,10 +52,16 @@ SIGNAL_STATUS_REJECTED = "REJECTED"
 DEMO_TP1_CLOSE_FRACTION = min(max(float(os.getenv("DEMO_TP1_CLOSE_FRACTION", "0.40")), 0.05), 0.95)
 DEMO_MIN_STOP_DISTANCE = max(float(os.getenv("DEMO_MIN_STOP_DISTANCE", str(XAU_PIP_SIZE * 5))), XAU_PIP_SIZE)
 LANE_ORDER = ("intraday", "swing")
-SIGNAL_EXPIRY_HOURS = int(os.getenv("SIGNAL_EXPIRY_HOURS", "6"))
+SIGNAL_EXPIRY_HOURS_BY_LANE = {
+    "intraday": int(os.getenv("SIGNAL_EXPIRY_HOURS_INTRADAY", os.getenv("SIGNAL_EXPIRY_HOURS", "6"))),
+    "swing": int(os.getenv("SIGNAL_EXPIRY_HOURS_SWING", "18")),
+}
 EXECUTION_VERSION = 2
 ENGINE_STALE_ALERT_MINUTES = 10
 ENGINE_ALERT_DEDUPE_MINUTES = 30
+ENTRY_ALLOWED_SESSIONS = ("LONDON", "LONDON_NY_OVERLAP")
+SIGNAL_CLOSE_FIELD_NAMES = ("monitor_updated_at", "closed_at", "exit_price", "realized_r")
+SIGNAL_CLOSE_FIELD_FALLBACK_WARNED = False
 
 TELEGRAM_EVENT_LABELS = {
     "NEW_SIGNAL": "New active signal",
@@ -104,7 +110,7 @@ LANES = {
         trigger_multiplier=15,
         confirm_timespan="hour",
         confirm_multiplier=1,
-        threshold=70,
+        threshold=76,
         risk_percent=0.50,
         stop_multiplier=1.35,
         min_rr_tp2=2.0,
@@ -116,7 +122,7 @@ LANES = {
         trigger_multiplier=1,
         confirm_timespan="hour",
         confirm_multiplier=4,
-        threshold=72,
+        threshold=78,
         risk_percent=0.75,
         stop_multiplier=1.60,
         min_rr_tp2=2.0,
@@ -202,9 +208,11 @@ def _candidate_ui_payload(candidate: dict | None, decision_state: str, reason: s
         "blocked_reason": candidate.get("blocked_reason"),
         "tp1_be_applied": False,
         "tp1_hit_at": None,
+        "tp1_fraction": DEMO_TP1_CLOSE_FRACTION,
         "last_tick_checked_at": None,
         "last_event_seq": 0,
         "execution_version": EXECUTION_VERSION,
+        "orig_sl": round(safe_float(candidate.get("sl"), 0), 5),
         "adaptive_exits": {
             "regime": candidate.get("regime"),
             "session": candidate.get("session_name"),
@@ -287,6 +295,10 @@ def _signal_ui_payload(signal_row: dict | None, decision_state: str, reason: str
         "atr_value": safe_float(signal_row.get("atr_value"), 0),
         "timeframe": signal_row.get("timeframe"),
         "h1_regime": conditions.get("adaptive_exits", {}).get("regime"),
+        "exit_price": safe_float(signal_row.get("exit_price"), 0),
+        "realized_r": safe_float(signal_row.get("realized_r"), 0),
+        "closed_at": signal_row.get("closed_at"),
+        "monitor_updated_at": signal_row.get("monitor_updated_at"),
         "conditions_met": conditions,
     }
 
@@ -302,18 +314,57 @@ def _decision_state_for_candidate(candidate: dict | None) -> str:
     return "BLOCKED"
 
 
-def check_active_signals_by_lane() -> dict[str, dict]:
+def normalize_lane_name(value: Any) -> str:
+    return "swing" if str(value or "intraday").strip().lower() == "swing" else "intraday"
+
+
+def session_allows_new_entries(session_name: str | None) -> bool:
+    return str(session_name or "").upper() in ENTRY_ALLOWED_SESSIONS
+
+
+def required_entry_confirmation(
+    lane_name: str,
+    *,
+    trend_filter: bool,
+    momentum: bool,
+    pullback: bool,
+    session_fit: bool,
+) -> tuple[bool, str | None]:
+    lane = normalize_lane_name(lane_name)
+    if lane == "intraday":
+        ok = bool(trend_filter and momentum and session_fit)
+        return ok, None if ok else "INTRADAY_CONFIRMATION_MISSING"
+    ok = bool(trend_filter and session_fit and (momentum or pullback))
+    return ok, None if ok else "SWING_CONFIRMATION_MISSING"
+
+
+def get_signal_expiry_hours(signal_row: dict | None) -> int:
+    lane = normalize_lane_name((signal_row or {}).get("lane"))
+    return max(int(SIGNAL_EXPIRY_HOURS_BY_LANE.get(lane, SIGNAL_EXPIRY_HOURS_BY_LANE["intraday"])), 1)
+
+
+def fetch_active_signal_rows() -> list[dict]:
     try:
         resp = supabase.table("signals").select("*").eq("status", "ACTIVE").order("created_at", desc=True).execute()
-        rows = resp.data or []
+        return resp.data or []
     except Exception:
-        return {}
+        return []
 
+
+def partition_active_signals(active_rows: list[dict]) -> tuple[dict[str, dict], list[dict]]:
     active_by_lane: dict[str, dict] = {}
-    for row in rows:
-        lane = str(row.get("lane") or "intraday").lower()
+    duplicates: list[dict] = []
+    for row in active_rows:
+        lane = normalize_lane_name(row.get("lane"))
         if lane not in active_by_lane:
             active_by_lane[lane] = row
+        else:
+            duplicates.append(row)
+    return active_by_lane, duplicates
+
+
+def check_active_signals_by_lane() -> dict[str, dict]:
+    active_by_lane, _ = partition_active_signals(fetch_active_signal_rows())
     return active_by_lane
 
 
@@ -776,21 +827,23 @@ def initialize_execution_state(signal_row: dict) -> dict:
     conditions.setdefault("last_tick_checked_at", None)
     conditions.setdefault("tp1_be_applied", False)
     conditions.setdefault("tp1_hit_at", None)
+    conditions.setdefault("tp1_fraction", DEMO_TP1_CLOSE_FRACTION)
+    conditions.setdefault("orig_sl", round(derive_signal_orig_sl(signal_row, conditions), 5))
     conditions.setdefault("last_event_seq", 0)
     return conditions
 
 
-def fetch_market_ticks_for_signal(signal_row: dict, limit: int = 1500) -> list[dict]:
+def fetch_market_ticks_for_signal(signal_row: dict, limit: int = 1500, since: datetime | None = None) -> list[dict]:
     conditions = initialize_execution_state(signal_row)
-    since = parse_dt(conditions.get("last_tick_checked_at")) or parse_dt(signal_row.get("created_at"))
+    since_dt = since or parse_dt(conditions.get("last_tick_checked_at")) or parse_dt(signal_row.get("created_at"))
     query = (
         supabase.table("market_ticks")
         .select("created_at,provider_ts,price,bid,ask,source")
         .order("created_at", desc=False)
         .limit(limit)
     )
-    if since:
-        query = query.gt("created_at", since.isoformat())
+    if since_dt:
+        query = query.gt("created_at", since_dt.isoformat())
 
     try:
         resp = query.execute()
@@ -883,7 +936,12 @@ def update_signal_execution_state(
     new_status: str | None = None,
     new_sl: float | None = None,
     latest_tick_time: str | None = None,
+    close_price: float | None = None,
+    closed_at: str | None = None,
+    realized_r: float | None = None,
+    monitor_updated_at: str | None = None,
 ) -> dict:
+    now_iso = monitor_updated_at or datetime.now(timezone.utc).isoformat()
     payload: dict[str, Any] = {"conditions_met": _dump_json(conditions_state)}
     if new_status:
         payload["status"] = new_status
@@ -892,8 +950,32 @@ def update_signal_execution_state(
     if latest_tick_time:
         conditions_state["last_tick_checked_at"] = latest_tick_time
         payload["conditions_met"] = _dump_json(conditions_state)
+    payload["monitor_updated_at"] = now_iso
+    if new_status in SIGNAL_STATUS_CLOSED:
+        payload["closed_at"] = closed_at or latest_tick_time or now_iso
+        payload["exit_price"] = round(safe_float(close_price, safe_float(signal_row.get("entry_price"), 0)), 5)
+        payload["realized_r"] = round(safe_float(realized_r, 0), 6)
 
-    supabase.table("signals").update(payload).eq("id", signal_row.get("id")).execute()
+    try:
+        supabase.table("signals").update(payload).eq("id", signal_row.get("id")).execute()
+    except Exception as exc:
+        error_text = str(exc).lower()
+        schema_mismatch = any(field in error_text for field in SIGNAL_CLOSE_FIELD_NAMES) and (
+            "column" in error_text or "schema cache" in error_text or "pgrst" in error_text or "42703" in error_text
+        )
+        if not schema_mismatch:
+            raise
+
+        fallback_payload = {k: v for k, v in payload.items() if k not in SIGNAL_CLOSE_FIELD_NAMES}
+        supabase.table("signals").update(fallback_payload).eq("id", signal_row.get("id")).execute()
+
+        global SIGNAL_CLOSE_FIELD_FALLBACK_WARNED
+        if not SIGNAL_CLOSE_FIELD_FALLBACK_WARNED:
+            SIGNAL_CLOSE_FIELD_FALLBACK_WARNED = True
+            print(
+                "  WARNING: signals close-field migration not detected; "
+                "runtime update retried without monitor/close columns."
+            )
     updated = dict(signal_row)
     updated.update(payload)
     updated["conditions_met"] = conditions_state
@@ -931,6 +1013,47 @@ def check_engine_runtime_health(latest_tick: dict, market_clock: dict) -> None:
         meta={"run_age_minutes": run_age_minutes, "tick_age_minutes": tick_age_minutes},
     ):
         print(f"  ALERT: runtime health issue detected ({alert_kind})")
+
+
+def check_active_signal_monitoring_health(active_rows: list[dict], stale_minutes: int = 15) -> None:
+    if not active_rows:
+        return
+
+    now = datetime.now(timezone.utc)
+    stale_rows: list[dict[str, Any]] = []
+    for row in active_rows:
+        conditions = initialize_execution_state(row)
+        ref_dt = (
+            parse_dt(row.get("monitor_updated_at"))
+            or parse_dt(conditions.get("last_tick_checked_at"))
+            or parse_dt(row.get("created_at"))
+        )
+        if not ref_dt:
+            continue
+        age_minutes = max(0, int((now - ref_dt).total_seconds() // 60))
+        if age_minutes >= max(stale_minutes, 1):
+            stale_rows.append(
+                {
+                    "id": row.get("id"),
+                    "lane": normalize_lane_name(row.get("lane")),
+                    "status": row.get("status"),
+                    "age_minutes": age_minutes,
+                }
+            )
+
+    if not stale_rows:
+        return
+
+    summary = ", ".join(f"{row['lane']}:{row['id']} ({row['age_minutes']}m)" for row in stale_rows[:4])
+    if send_operational_alert(
+        "SIGNAL_MONITOR_STALE",
+        (
+            "XAUradar runtime alert | SIGNAL_MONITOR_STALE\n"
+            f"Stale active-signal monitors detected: {summary}"
+        ),
+        meta={"stale_rows": stale_rows},
+    ):
+        print(f"  ALERT: stale signal monitoring detected for {len(stale_rows)} active signals")
 
 
 def check_market_tick_freshness(warn_minutes: int = 10, alert_minutes: int = 15) -> dict:
@@ -1139,6 +1262,73 @@ def update_daily_risk_from_close(row: dict, new_status: str) -> None:
         supabase.table("risk_guard_state").upsert(state, on_conflict="trade_date").execute()
     except Exception:
         pass
+
+
+def derive_signal_orig_sl(signal_row: dict, conditions: dict | None = None) -> float:
+    conditions = conditions or {}
+    entry = safe_float(signal_row.get("entry_price"), 0)
+    current_sl = safe_float(signal_row.get("sl"), 0)
+    side = str(signal_row.get("type", "BUY")).upper()
+    orig_sl = safe_float((conditions or {}).get("orig_sl"), 0)
+    if entry > 0 and orig_sl > 0 and abs(orig_sl - entry) > 1e-9:
+        return orig_sl
+
+    rr_value = safe_float(signal_row.get("rr_value"), 0)
+    tp2 = safe_float(signal_row.get("tp2"), 0)
+    if entry > 0 and tp2 > 0 and rr_value > 0:
+        stop_distance = abs(tp2 - entry) / max(rr_value, 1e-9)
+        if stop_distance > 0:
+            return entry - stop_distance if side == "BUY" else entry + stop_distance
+
+    if entry > 0 and current_sl > 0:
+        return current_sl
+    return 0.0
+
+
+def compute_signal_realized_r(signal_row: dict, exit_price: float, conditions: dict | None = None) -> float:
+    conditions = conditions or initialize_execution_state(signal_row)
+    entry = safe_float(signal_row.get("entry_price"), 0)
+    tp1 = safe_float(signal_row.get("tp1"), 0)
+    if entry <= 0:
+        return 0.0
+
+    orig_sl = derive_signal_orig_sl(signal_row, conditions)
+    risk_distance = max(abs(entry - orig_sl), 1e-9)
+    exit_r = _trade_price_move(signal_row.get("type", "BUY"), entry, exit_price) / risk_distance
+    tp1_applied = bool(conditions.get("tp1_be_applied")) or bool(conditions.get("tp1_hit_at"))
+    if not tp1_applied:
+        return float(exit_r)
+
+    tp1_fraction = min(max(safe_float(conditions.get("tp1_fraction"), DEMO_TP1_CLOSE_FRACTION), 0.05), 0.95)
+    tp1_r = _trade_price_move(signal_row.get("type", "BUY"), entry, tp1) / risk_distance if tp1 > 0 else 0.0
+    remaining_fraction = max(1.0 - tp1_fraction, 0.0)
+    return float((tp1_fraction * tp1_r) + (remaining_fraction * exit_r))
+
+
+def compute_signal_realized_pips(signal_row: dict, exit_price: float, conditions: dict | None = None) -> float:
+    conditions = conditions or initialize_execution_state(signal_row)
+    entry = safe_float(signal_row.get("entry_price"), 0)
+    tp1 = safe_float(signal_row.get("tp1"), 0)
+    if entry <= 0:
+        return 0.0
+
+    exit_move_pips = _trade_price_move(signal_row.get("type", "BUY"), entry, exit_price) / XAU_PIP_SIZE
+    tp1_applied = bool(conditions.get("tp1_be_applied")) or bool(conditions.get("tp1_hit_at"))
+    if not tp1_applied:
+        return float(exit_move_pips)
+
+    tp1_fraction = min(max(safe_float(conditions.get("tp1_fraction"), DEMO_TP1_CLOSE_FRACTION), 0.05), 0.95)
+    tp1_move_pips = (_trade_price_move(signal_row.get("type", "BUY"), entry, tp1) / XAU_PIP_SIZE) if tp1 > 0 else 0.0
+    remaining_fraction = max(1.0 - tp1_fraction, 0.0)
+    return float((tp1_fraction * tp1_move_pips) + (remaining_fraction * exit_move_pips))
+
+
+def build_signal_close_metrics(signal_row: dict, exit_price: float, conditions: dict | None = None) -> dict[str, float]:
+    rounded_exit = round(safe_float(exit_price, safe_float(signal_row.get("entry_price"), 0)), 5)
+    return {
+        "exit_price": rounded_exit,
+        "realized_r": round(compute_signal_realized_r(signal_row, rounded_exit, conditions), 6),
+    }
 
 
 def compute_position_size(balance: float, risk_percent: float, entry: float, sl: float) -> float:
@@ -1639,15 +1829,7 @@ def settle_demo_trades_for_signal(
     if not open_trades:
         return {"closed_count": 0, "failed_count": 0, "signal_id": signal_id, "trade_ids": []}
 
-    close_price_map = {
-        "HIT_TP1": safe_float(signal_row.get("tp1"), current_price),
-        "HIT_TP2": safe_float(signal_row.get("tp2"), current_price),
-        "HIT_TP3": safe_float(signal_row.get("tp3"), current_price),
-        "HIT_SL": safe_float(signal_row.get("sl"), current_price),
-        "BREAKEVEN": safe_float(signal_row.get("sl"), safe_float(signal_row.get("entry_price"), current_price)),
-        "EXPIRED": safe_float(current_price, safe_float(signal_row.get("entry_price"), 0)),
-    }
-    close_price = safe_float(close_price_map.get(closed_status), current_price)
+    close_price = resolve_signal_exit_price(signal_row, closed_status, current_price)
     if closed_status in ("HIT_TP1", "HIT_TP2", "HIT_TP3"):
         trade_status = "WIN"
     elif closed_status == "HIT_SL":
@@ -2003,8 +2185,19 @@ def build_candidate(
     rr_required = max(2.0, lane.min_rr_tp2)
     rr_ok = rr_tp2 >= (rr_required - 1e-9)
 
+    required_setup_ok, required_setup_reason = required_entry_confirmation(
+        lane.name,
+        trend_filter=bool(trend_filter),
+        momentum=bool(momentum),
+        pullback=bool(pullback),
+        session_fit=bool(session_fit),
+    )
+    session_allowed = session_allows_new_entries(session_name)
+
     blocked = None
-    if news["high_blackout"]:
+    if not session_allowed:
+        blocked = "SESSION_NOT_ALLOWED"
+    elif news["high_blackout"]:
         blocked = "HIGH_IMPACT_BLACKOUT"
     elif not spread_ok:
         blocked = "SPREAD_TOO_WIDE"
@@ -2012,13 +2205,10 @@ def build_candidate(
         blocked = "RR_BELOW_MIN"
     elif not stop_band_ok:
         blocked = "STOP_DISTANCE_OUT_OF_BAND"
+    elif not required_setup_ok:
+        blocked = required_setup_reason
 
-    threshold = lane.threshold + threshold_adjust
-    if regime == "RANGE":
-        threshold -= 2
-    if session_name == "ASIA":
-        threshold -= 1
-    threshold = max(66 if lane.name == "intraday" else 68, threshold)
+    threshold = lane.threshold + threshold_adjust + (3 if news["medium_penalty"] else 0)
     if blocked is None and score_total < threshold:
         blocked = "SCORE_BELOW_THRESHOLD"
 
@@ -2050,7 +2240,14 @@ def build_candidate(
         "threshold": threshold,
         "session_context": session["name"],
         "news_context": {"high_blackout": news["high_blackout"], "medium_penalty": news["medium_penalty"]},
-        "hard_gates": {"spread_ok": spread_ok, "min_rr_ok": rr_ok, "stop_band_ok": stop_band_ok, "news_ok": not news["high_blackout"]},
+        "hard_gates": {
+            "spread_ok": spread_ok,
+            "min_rr_ok": rr_ok,
+            "stop_band_ok": stop_band_ok,
+            "news_ok": not news["high_blackout"],
+            "session_allowed": session_allowed,
+            "required_setup_ok": required_setup_ok,
+        },
         "conditions": {
             "trend_filter": bool(trend_filter),
             "momentum": bool(momentum),
@@ -2059,6 +2256,8 @@ def build_candidate(
             "volatility_spread": bool(volatility_ok),
             "macro_news": not news["high_blackout"],
             "session_fit": bool(session_fit),
+            "session_allowed": bool(session_allowed),
+            "required_setup_ok": bool(required_setup_ok),
         },
         "regime": regime,
         "session_name": session_name,
@@ -2075,7 +2274,7 @@ def rolling_expectancy(limit: int = 50) -> float:
     try:
         resp = (
             supabase.table("signals")
-            .select("status")
+            .select("status,realized_r")
             .in_("status", list(SIGNAL_STATUS_CLOSED))
             .order("created_at", desc=True)
             .limit(limit)
@@ -2087,7 +2286,7 @@ def rolling_expectancy(limit: int = 50) -> float:
     if not rows:
         return 0.0
     m = {"HIT_TP1": 1.0, "HIT_TP2": 2.0, "HIT_TP3": 3.0, "HIT_SL": -1.0, "BREAKEVEN": 0.0, "EXPIRED": -0.2}
-    vals = [m.get(r.get("status"), 0.0) for r in rows]
+    vals = [safe_float(r.get("realized_r"), m.get(r.get("status"), 0.0)) for r in rows]
     return float(sum(vals) / max(len(vals), 1))
 
 
@@ -2095,7 +2294,7 @@ def rolling_lane_session_metrics(lane: str, session_name: str, limit: int = 120)
     try:
         resp = (
             supabase.table("signals")
-            .select("status,lane,session_context")
+            .select("status,lane,session_context,realized_r")
             .in_("status", list(SIGNAL_STATUS_CLOSED))
             .eq("lane", lane)
             .eq("session_context", session_name)
@@ -2110,7 +2309,7 @@ def rolling_lane_session_metrics(lane: str, session_name: str, limit: int = 120)
     if not rows:
         return {"expectancy": 0.0, "drawdown_r": 0.0, "count": 0}
     m = {"HIT_TP1": 1.0, "HIT_TP2": 2.0, "HIT_TP3": 3.0, "HIT_SL": -1.0, "BREAKEVEN": 0.0, "EXPIRED": -0.2}
-    vals = [m.get(r.get("status"), 0.0) for r in rows]
+    vals = [safe_float(r.get("realized_r"), m.get(r.get("status"), 0.0)) for r in rows]
     expectancy = float(sum(vals) / max(len(vals), 1))
     equity = 0.0
     peak = 0.0
@@ -2127,12 +2326,55 @@ def check_active_signal() -> dict | None:
     return active.get("intraday") or active.get("swing")
 
 
+def replay_signal_from_full_history(signal_row: dict, limit: int = 2000) -> dict:
+    created = parse_dt(signal_row.get("created_at"))
+    full_ticks = fetch_market_ticks_for_signal(signal_row, limit=limit, since=created)
+    return evaluate_signal_crossings(signal_row, full_ticks)
+
+
+def close_duplicate_active_signal(
+    signal_row: dict,
+    keeper_signal: dict,
+    market_price: float,
+    source_tick_time: str | None = None,
+) -> dict:
+    conditions_state = initialize_execution_state(signal_row)
+    conditions_state["duplicate_lane_cleanup"] = True
+    conditions_state["duplicate_lane_keeper"] = keeper_signal.get("id")
+    metrics = build_signal_close_metrics(signal_row, market_price, conditions_state)
+    updated_signal = update_signal_execution_state(
+        signal_row,
+        conditions_state,
+        new_status="EXPIRED",
+        latest_tick_time=source_tick_time,
+        close_price=metrics["exit_price"],
+        closed_at=source_tick_time,
+        realized_r=metrics["realized_r"],
+    )
+    settle_demo_trades_for_signal(updated_signal, "EXPIRED", metrics["exit_price"], source_tick_time=source_tick_time)
+    record_engine_runtime_event(
+        "DUPLICATE_ACTIVE_SIGNAL",
+        market_price=metrics["exit_price"],
+        meta={
+            "signal_id": signal_row.get("id"),
+            "lane": normalize_lane_name(signal_row.get("lane")),
+            "keeper_signal_id": keeper_signal.get("id"),
+        },
+    )
+    print(
+        "  Active signal duplicate cleanup: "
+        f"{signal_row.get('id')} -> EXPIRED (keeper={keeper_signal.get('id')})"
+    )
+    return updated_signal
+
+
 def reconcile_active_signal_from_ticks(signal_row: dict, ticks_since_last_check: list[dict]) -> dict:
     updated_signal = dict(signal_row)
     status = str(signal_row.get("status", "ACTIVE")).upper()
     rr_value = safe_float(signal_row.get("rr_value"), 0)
     conditions_state = initialize_execution_state(signal_row)
     latest_tick_time = ticks_since_last_check[-1].get("tick_time") if ticks_since_last_check else conditions_state.get("last_tick_checked_at")
+    heartbeat_at = datetime.now(timezone.utc).isoformat()
 
     if status != "ACTIVE":
         return updated_signal
@@ -2142,11 +2384,20 @@ def reconcile_active_signal_from_ticks(signal_row: dict, ticks_since_last_check:
         conditions_state["legacy_rr_cleanup"] = True
         conditions_state["legacy_rr_value"] = rr_value
         conditions_state["last_tick_checked_at"] = latest_tick_time
+        exit_price = safe_float(
+            ticks_since_last_check[-1].get("price"),
+            safe_float(signal_row.get("entry_price"), 0),
+        ) if ticks_since_last_check else safe_float(signal_row.get("entry_price"), 0)
+        close_metrics = build_signal_close_metrics(signal_row, exit_price, conditions_state)
         return update_signal_execution_state(
             signal_row,
             conditions_state,
             new_status="EXPIRED",
             latest_tick_time=latest_tick_time,
+            close_price=close_metrics["exit_price"],
+            closed_at=latest_tick_time,
+            realized_r=close_metrics["realized_r"],
+            monitor_updated_at=heartbeat_at,
         )
 
     crossing = evaluate_signal_crossings(signal_row, ticks_since_last_check)
@@ -2166,6 +2417,7 @@ def reconcile_active_signal_from_ticks(signal_row: dict, ticks_since_last_check:
             conditions_state,
             new_sl=safe_float(signal_row.get("entry_price"), safe_float(signal_row.get("sl"), 0)),
             latest_tick_time=latest_tick_time,
+            monitor_updated_at=heartbeat_at,
         )
         partial_count = apply_demo_tp1_partial(
             updated_signal,
@@ -2186,13 +2438,6 @@ def reconcile_active_signal_from_ticks(signal_row: dict, ticks_since_last_check:
     if final_status:
         conditions_state = initialize_execution_state(updated_signal)
         conditions_state["last_event_seq"] = int(conditions_state.get("last_event_seq") or 0) + 1
-        updated_signal = update_signal_execution_state(
-            updated_signal,
-            conditions_state,
-            new_status=final_status,
-            latest_tick_time=latest_tick_time,
-        )
-        update_daily_risk_from_close(signal_row, final_status)
         event_price = safe_float(
             {
                 "HIT_TP2": updated_signal.get("tp2"),
@@ -2203,10 +2448,22 @@ def reconcile_active_signal_from_ticks(signal_row: dict, ticks_since_last_check:
             }.get(final_status),
             safe_float(final_tick.get("price") if final_tick else updated_signal.get("entry_price"), 0),
         )
+        close_metrics = build_signal_close_metrics(updated_signal, event_price, conditions_state)
+        updated_signal = update_signal_execution_state(
+            updated_signal,
+            conditions_state,
+            new_status=final_status,
+            latest_tick_time=latest_tick_time,
+            close_price=close_metrics["exit_price"],
+            closed_at=(final_tick or {}).get("tick_time"),
+            realized_r=close_metrics["realized_r"],
+            monitor_updated_at=heartbeat_at,
+        )
+        update_daily_risk_from_close(updated_signal, final_status)
         settlement_result = settle_demo_trades_for_signal(
             updated_signal,
             final_status,
-            event_price,
+            close_metrics["exit_price"],
             source_tick_time=(final_tick or {}).get("tick_time"),
         )
         notified = notify_signal_event(
@@ -2219,7 +2476,7 @@ def reconcile_active_signal_from_ticks(signal_row: dict, ticks_since_last_check:
                 "EXPIRED": "EXPIRED",
             }.get(final_status, final_status),
             final_status,
-            event_price=event_price,
+            event_price=close_metrics["exit_price"],
             meta={"source_tick_time": (final_tick or {}).get("tick_time")},
             event_key=_build_event_key(signal_row.get("id"), final_status, (final_tick or {}).get("tick_time")),
         )
@@ -2241,21 +2498,103 @@ def reconcile_active_signal_from_ticks(signal_row: dict, ticks_since_last_check:
         return updated_signal
 
     created = parse_dt(signal_row.get("created_at"))
-    if created and datetime.now(timezone.utc) - created > timedelta(hours=SIGNAL_EXPIRY_HOURS):
+    expiry_hours = get_signal_expiry_hours(signal_row)
+    if created and datetime.now(timezone.utc) - created > timedelta(hours=expiry_hours):
+        recovery = replay_signal_from_full_history(signal_row)
+        recovery_conditions = recovery["conditions"]
+        recovery_partial_tick = recovery["partial_tick"]
+        recovery_final_status = recovery["final_status"]
+        recovery_final_tick = recovery["final_tick"]
+        recovery_latest_tick_time = recovery["latest_tick_time"] or latest_tick_time
+
+        if recovery_partial_tick and not conditions_state.get("tp1_be_applied"):
+            tp1_price = safe_float(signal_row.get("tp1"), safe_float(recovery_partial_tick.get("price"), 0))
+            recovery_conditions["tp1_be_applied"] = True
+            recovery_conditions["tp1_hit_at"] = recovery_partial_tick.get("tick_time")
+            recovery_conditions["last_event_seq"] = int(recovery_conditions.get("last_event_seq") or 0) + 1
+            updated_signal = update_signal_execution_state(
+                updated_signal,
+                recovery_conditions,
+                new_sl=safe_float(signal_row.get("entry_price"), safe_float(signal_row.get("sl"), 0)),
+                latest_tick_time=recovery_latest_tick_time,
+                monitor_updated_at=heartbeat_at,
+            )
+            apply_demo_tp1_partial(
+                updated_signal,
+                tp1_price,
+                source_tick_time=recovery_partial_tick.get("tick_time"),
+            )
+            conditions_state = initialize_execution_state(updated_signal)
+        else:
+            conditions_state = recovery_conditions
+            latest_tick_time = recovery_latest_tick_time
+
+        if recovery_final_status:
+            event_price = safe_float(
+                {
+                    "HIT_TP2": updated_signal.get("tp2"),
+                    "HIT_TP3": updated_signal.get("tp3"),
+                    "HIT_SL": updated_signal.get("sl"),
+                    "BREAKEVEN": updated_signal.get("sl"),
+                }.get(recovery_final_status),
+                safe_float((recovery_final_tick or {}).get("price"), safe_float(updated_signal.get("entry_price"), 0)),
+            )
+            close_metrics = build_signal_close_metrics(updated_signal, event_price, conditions_state)
+            updated_signal = update_signal_execution_state(
+                updated_signal,
+                conditions_state,
+                new_status=recovery_final_status,
+                latest_tick_time=recovery_latest_tick_time,
+                close_price=close_metrics["exit_price"],
+                closed_at=(recovery_final_tick or {}).get("tick_time"),
+                realized_r=close_metrics["realized_r"],
+                monitor_updated_at=heartbeat_at,
+            )
+            update_daily_risk_from_close(updated_signal, recovery_final_status)
+            settle_demo_trades_for_signal(
+                updated_signal,
+                recovery_final_status,
+                close_metrics["exit_price"],
+                source_tick_time=(recovery_final_tick or {}).get("tick_time"),
+            )
+            notify_signal_event(
+                updated_signal,
+                {
+                    "HIT_TP2": "TP2",
+                    "HIT_TP3": "TP3",
+                    "HIT_SL": "STOP_LOSS",
+                    "BREAKEVEN": "BREAKEVEN",
+                }.get(recovery_final_status, recovery_final_status),
+                recovery_final_status,
+                event_price=close_metrics["exit_price"],
+                meta={"source_tick_time": (recovery_final_tick or {}).get("tick_time"), "recovered": True},
+                event_key=_build_event_key(signal_row.get("id"), recovery_final_status, (recovery_final_tick or {}).get("tick_time")),
+            )
+            print(f"  Active signal recovered from full tick history: ACTIVE -> {recovery_final_status}")
+            return updated_signal
+
         conditions_state["last_event_seq"] = int(conditions_state.get("last_event_seq") or 0) + 1
+        expire_price = safe_float(
+            ticks_since_last_check[-1].get("price"),
+            safe_float(updated_signal.get("entry_price"), 0),
+        ) if ticks_since_last_check else safe_float(updated_signal.get("entry_price"), 0)
+        close_metrics = build_signal_close_metrics(updated_signal, expire_price, conditions_state)
         updated_signal = update_signal_execution_state(
             updated_signal,
             conditions_state,
             new_status="EXPIRED",
             latest_tick_time=latest_tick_time,
+            close_price=close_metrics["exit_price"],
+            closed_at=latest_tick_time,
+            realized_r=close_metrics["realized_r"],
+            monitor_updated_at=heartbeat_at,
         )
-        expire_price = safe_float(ticks_since_last_check[-1].get("price"), safe_float(updated_signal.get("entry_price"), 0)) if ticks_since_last_check else safe_float(updated_signal.get("entry_price"), 0)
-        settlement_result = settle_demo_trades_for_signal(updated_signal, "EXPIRED", expire_price, source_tick_time=latest_tick_time)
+        settlement_result = settle_demo_trades_for_signal(updated_signal, "EXPIRED", close_metrics["exit_price"], source_tick_time=latest_tick_time)
         notified = notify_signal_event(
             updated_signal,
             "EXPIRED",
             "EXPIRED",
-            event_price=expire_price,
+            event_price=close_metrics["exit_price"],
             meta={"source_tick_time": latest_tick_time},
             event_key=_build_event_key(signal_row.get("id"), "EXPIRED", latest_tick_time),
         )
@@ -2278,7 +2617,12 @@ def reconcile_active_signal_from_ticks(signal_row: dict, ticks_since_last_check:
 
     if latest_tick_time:
         conditions_state["last_tick_checked_at"] = latest_tick_time
-        updated_signal = update_signal_execution_state(updated_signal, conditions_state, latest_tick_time=latest_tick_time)
+    updated_signal = update_signal_execution_state(
+        updated_signal,
+        conditions_state,
+        latest_tick_time=latest_tick_time,
+        monitor_updated_at=heartbeat_at,
+    )
     return updated_signal
 
 
@@ -2495,32 +2839,63 @@ def run_signal_engine() -> None:
     print(f"{'=' * 62}")
 
     market_clock = get_market_clock_context()
-    active_by_lane = check_active_signals_by_lane()
+    active_rows = fetch_active_signal_rows()
+    active_by_lane, duplicate_active_rows = partition_active_signals(active_rows)
     sync_demo_trades_for_active_signals(active_by_lane)
-    record_engine_runtime_event("STARTED", meta={"market_clock": market_clock, "active_lanes": list(active_by_lane.keys())})
+    record_engine_runtime_event(
+        "STARTED",
+        meta={
+            "market_clock": market_clock,
+            "active_lanes": list(active_by_lane.keys()),
+            "active_count": len(active_rows),
+            "duplicate_active_count": len(duplicate_active_rows),
+        },
+    )
     if not market_clock["market_open"]:
         print(f"  Market closed ({market_clock['reason']}): skipping candle fetch, signal generation, and signal expiry checks.")
-        record_engine_runtime_event("ABORTED", meta={"reason": market_clock["reason"], "market_clock": market_clock})
+        record_engine_runtime_event(
+            "ABORTED",
+            meta={
+                "reason": market_clock["reason"],
+                "market_clock": market_clock,
+            },
+        )
         return
 
     spread_info = fetch_latest_spread()
     latest_tick = fetch_latest_tick()
+
     check_market_tick_freshness(warn_minutes=10, alert_minutes=15)
     check_engine_runtime_health(latest_tick, market_clock)
+    check_active_signal_monitoring_health(active_rows)
 
     if safe_float(latest_tick.get("mid"), safe_float(latest_tick.get("price"), 0)) > 0:
+        monitor_price = safe_float(latest_tick.get("mid"), safe_float(latest_tick.get("price"), 0))
+        monitor_tick_time = latest_tick.get("provider_ts") or latest_tick.get("created_at")
         print(
-            f"  Active-trade monitor price: {safe_float(latest_tick.get('mid'), safe_float(latest_tick.get('price'), 0)):.2f} "
+            f"  Active-trade monitor price: {monitor_price:.2f} "
             f"(bid={safe_float(latest_tick.get('bid'), 0):.2f}, ask={safe_float(latest_tick.get('ask'), 0):.2f}, src={latest_tick.get('source')})"
         )
-        for lane_name, active_signal in list(active_by_lane.items()):
+        reconciled_rows: list[dict] = []
+        for active_signal in active_rows:
             ticks_since_last_check = fetch_market_ticks_for_signal(active_signal)
             updated_signal = reconcile_active_signal_from_ticks(active_signal, ticks_since_last_check)
             if str(updated_signal.get("status", "")).upper() == "ACTIVE":
-                active_by_lane[lane_name] = updated_signal
-                create_demo_trades_for_signal(updated_signal)
-            else:
-                active_by_lane.pop(lane_name, None)
+                reconciled_rows.append(updated_signal)
+
+        active_by_lane, duplicate_active_rows = partition_active_signals(reconciled_rows)
+        for duplicate_signal in duplicate_active_rows:
+            keeper = active_by_lane.get(normalize_lane_name(duplicate_signal.get("lane")))
+            if keeper and keeper.get("id") != duplicate_signal.get("id"):
+                close_duplicate_active_signal(
+                    duplicate_signal,
+                    keeper_signal=keeper,
+                    market_price=monitor_price,
+                    source_tick_time=monitor_tick_time,
+                )
+
+        for kept_signal in active_by_lane.values():
+            create_demo_trades_for_signal(kept_signal)
     else:
         print("  WARNING: no valid market_ticks price for active-trade monitoring this run.")
 
@@ -2600,6 +2975,31 @@ def run_signal_engine() -> None:
     print(f"{'=' * 62}")
     print("Signal engine run complete")
     print(f"{'=' * 62}")
+
+
+def run_demo_trade_backfill() -> dict[str, Any]:
+    print(f"\n{'=' * 62}")
+    print(f"Demo Trade Backfill - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"{'=' * 62}")
+
+    latest_tick = fetch_latest_tick()
+    reconcile_price = safe_float(latest_tick.get("price"), safe_float(latest_tick.get("mid"), 0))
+    summary = reconcile_demo_trades_for_closed_signals(reconcile_price)
+    record_engine_runtime_event(
+        "DEMO_BACKFILL",
+        market_price=reconcile_price,
+        meta={
+            **summary,
+            "latest_tick_time": latest_tick.get("provider_ts") or latest_tick.get("created_at"),
+        },
+    )
+    print(
+        "  Demo backfill complete: "
+        f"recovered={summary.get('recovered_count', 0)} "
+        f"failed={summary.get('failed_count', 0)} "
+        f"scanned={summary.get('scanned_open_trades', 0)}"
+    )
+    return summary
 
 
 if __name__ == "__main__":

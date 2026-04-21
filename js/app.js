@@ -82,48 +82,151 @@ function renderSignalDashboard() {
 
 function deriveStatsFromHistory(signals) {
   if (!signals || signals.length === 0) return null;
-  const tradableSignals = signals.filter((signal) => String(signal.status || '').toUpperCase() !== 'REJECTED');
-  const closed = tradableSignals.filter((signal) => String(signal.status || 'ACTIVE').toUpperCase() !== 'ACTIVE');
-  const wins = closed.filter((signal) => ['HIT_TP1', 'HIT_TP2', 'HIT_TP3'].includes(String(signal.status || '').toUpperCase()));
-  const tp2 = closed.filter((signal) => ['HIT_TP2', 'HIT_TP3'].includes(String(signal.status || '').toUpperCase()));
-  const tp3 = closed.filter((signal) => String(signal.status || '').toUpperCase() === 'HIT_TP3');
-  const losses = closed.filter((signal) => String(signal.status || '').toUpperCase() === 'HIT_SL');
-  const total = closed.length || 1;
-  const winRate = ((wins.length / total) * 100).toFixed(1);
-  const totalPips = closed.reduce((sum, signal) => {
+  const normalizeStatus = (status) => String(status || '').toUpperCase();
+  const statusR = (status) => {
+    const normalized = normalizeStatus(status);
+    if (normalized === 'HIT_TP1') return 1.0;
+    if (normalized === 'HIT_TP2') return 2.0;
+    if (normalized === 'HIT_TP3') return 3.0;
+    if (normalized === 'HIT_SL') return -1.0;
+    if (normalized === 'BREAKEVEN') return 0.0;
+    if (normalized === 'EXPIRED') return -0.2;
+    return 0;
+  };
+  const origStopDistance = (signal) => {
     const entry = Number(signal.entry_price);
-    const status = String(signal.status || '').toUpperCase();
-    if (!Number.isFinite(entry)) return sum;
+    if (!Number.isFinite(entry)) return NaN;
+    const conditions = signal.conditions_met && typeof signal.conditions_met === 'object' ? signal.conditions_met : {};
+    const origSl = Number(conditions.orig_sl);
+    if (Number.isFinite(origSl) && Math.abs(origSl - entry) > 1e-9) {
+      return Math.abs(entry - origSl);
+    }
+    const rrValue = Number(signal.rr_value);
+    const tp2 = Number(signal.tp2);
+    if (Number.isFinite(rrValue) && rrValue > 0 && Number.isFinite(tp2)) {
+      return Math.abs(tp2 - entry) / rrValue;
+    }
+    const sl = Number(signal.stop_loss ?? signal.sl);
+    return Number.isFinite(sl) ? Math.abs(entry - sl) : NaN;
+  };
+  const realizedR = (signal) => {
+    const stored = Number(signal.realized_r);
+    if (Number.isFinite(stored)) return stored;
+    const entry = Number(signal.entry_price);
+    const exitPrice = Number(signal.exit_price);
+    const stopDistance = origStopDistance(signal);
+    const conditions = signal.conditions_met && typeof signal.conditions_met === 'object' ? signal.conditions_met : {};
+    const side = String(signal.type || signal.signal_type || 'BUY').toUpperCase();
+    if (Number.isFinite(entry) && Number.isFinite(exitPrice) && Number.isFinite(stopDistance) && stopDistance > 0) {
+      const exitR = (side === 'SELL' ? entry - exitPrice : exitPrice - entry) / stopDistance;
+      const tp1Applied = Boolean(conditions.tp1_be_applied || conditions.tp1_hit_at);
+      if (!tp1Applied) return exitR;
+      const tp1 = Number(signal.tp1);
+      const tp1Fraction = Math.max(0.05, Math.min(0.95, Number(conditions.tp1_fraction) || 0.4));
+      const tp1R = Number.isFinite(tp1) ? ((side === 'SELL' ? entry - tp1 : tp1 - entry) / stopDistance) : 0;
+      return (tp1Fraction * tp1R) + ((1 - tp1Fraction) * exitR);
+    }
+    return statusR(signal.status);
+  };
+  const realizedPips = (signal) => {
+    const stopDistance = origStopDistance(signal);
+    const rValue = realizedR(signal);
+    if (Number.isFinite(stopDistance) && stopDistance > 0 && Number.isFinite(rValue)) {
+      return rValue * (stopDistance / APP_XAU_PIP_SIZE);
+    }
+    return 0;
+  };
+  const calcMetrics = (rows) => {
+    if (!rows || rows.length === 0) {
+      return {
+        count: 0,
+        winRate: 0,
+        expectancy: 0,
+        avgRR: 0,
+        drawdown: 0,
+        tp1: 0,
+        tp2: 0,
+        tp3: 0,
+        sl: 0,
+      };
+    }
 
-    let move = 0;
-    if (status === 'HIT_TP1') move = Math.abs(Number(signal.tp1) - entry);
-    if (status === 'HIT_TP2') move = Math.abs(Number(signal.tp2) - entry);
-    if (status === 'HIT_TP3') move = Math.abs(Number(signal.tp3) - entry);
-    if (status === 'HIT_SL') move = -Math.abs(Number(signal.stop_loss ?? signal.sl) - entry);
-    return Number.isFinite(move) ? sum + (move / APP_XAU_PIP_SIZE) : sum;
-  }, 0);
+    const tp1 = rows.filter((signal) => Boolean(signal.conditions_met?.tp1_hit_at) || ['HIT_TP1', 'HIT_TP2', 'HIT_TP3'].includes(normalizeStatus(signal.status))).length;
+    const tp2 = rows.filter((signal) => ['HIT_TP2', 'HIT_TP3'].includes(normalizeStatus(signal.status))).length;
+    const tp3 = rows.filter((signal) => normalizeStatus(signal.status) === 'HIT_TP3').length;
+    const rvals = rows.map((signal) => realizedR(signal));
+    const positiveR = rvals.filter((value) => value > 0);
+    const losses = rvals.filter((value) => value < 0).length;
+    const expectancy = rvals.length ? (rvals.reduce((sum, value) => sum + value, 0) / rvals.length) : 0;
+    const avgRR = positiveR.length ? (positiveR.reduce((sum, value) => sum + value, 0) / positiveR.length) : 0;
+
+    let equity = 0;
+    let peak = 0;
+    let maxDrawdown = 0;
+    rvals.forEach((value) => {
+      equity += value;
+      if (equity > peak) peak = equity;
+      maxDrawdown = Math.max(maxDrawdown, peak - equity);
+    });
+
+    return {
+      count: rows.length,
+      winRate: rows.length ? (positiveR.length / rows.length) * 100 : 0,
+      expectancy,
+      avgRR,
+      drawdown: maxDrawdown,
+      tp1,
+      tp2,
+      tp3,
+      sl: losses,
+    };
+  };
+
+  const tradableSignals = signals.filter((signal) => normalizeStatus(signal.status) !== 'REJECTED');
+  const closed = tradableSignals.filter((signal) => normalizeStatus(signal.status || 'ACTIVE') !== 'ACTIVE');
+  const overall = calcMetrics(closed);
+  const wins = closed.filter((signal) => realizedR(signal) > 0);
+  const losses = closed.filter((signal) => realizedR(signal) < 0);
+  const totalPips = closed.reduce((sum, signal) => sum + realizedPips(signal), 0);
+  const byLane = (lane) => closed.filter((signal) => String(signal.lane || 'intraday').toLowerCase() === lane);
+  const intraday = calcMetrics(byLane('intraday'));
+  const swing = calcMetrics(byLane('swing'));
+  const windows = {};
+  [50, 100, 300].forEach((size) => {
+    windows[`w${size}`] = calcMetrics(closed.slice(0, size));
+  });
 
   return {
     totalSignals: tradableSignals.length,
     winCount: wins.length,
     lossCount: losses.length,
-    winRate,
+    winRate: overall.winRate.toFixed(1),
     totalPips: totalPips.toFixed(1),
-    expectancy: '0.00',
-    avgRR: '0.00',
-    drawdown: '0.00',
-    tp1Hits: wins.length,
-    tp2Hits: tp2.length,
-    tp3Hits: tp3.length,
-    slHits: losses.length,
+    expectancy: overall.expectancy.toFixed(2),
+    avgRR: overall.avgRR.toFixed(2),
+    drawdown: overall.drawdown.toFixed(2),
+    tp1Hits: tradableSignals.filter((signal) => Boolean(signal.conditions_met?.tp1_hit_at) || ['HIT_TP1', 'HIT_TP2', 'HIT_TP3'].includes(String(signal.status || '').toUpperCase())).length,
+    tp2Hits: overall.tp2,
+    tp3Hits: overall.tp3,
+    slHits: overall.sl,
     laneStats: {
-      intraday: { count: 0, winRate: '0.0', expectancy: '0.00', avgRR: '0.00' },
-      swing: { count: 0, winRate: '0.0', expectancy: '0.00', avgRR: '0.00' },
+      intraday: {
+        count: intraday.count,
+        winRate: intraday.winRate.toFixed(1),
+        expectancy: intraday.expectancy.toFixed(2),
+        avgRR: intraday.avgRR.toFixed(2),
+      },
+      swing: {
+        count: swing.count,
+        winRate: swing.winRate.toFixed(1),
+        expectancy: swing.expectancy.toFixed(2),
+        avgRR: swing.avgRR.toFixed(2),
+      },
     },
     windows: {
-      w50: { expectancy: '0.00', winRate: '0.0' },
-      w100: { expectancy: '0.00', winRate: '0.0' },
-      w300: { expectancy: '0.00', winRate: '0.0' },
+      w50: { expectancy: windows.w50.expectancy.toFixed(2), winRate: windows.w50.winRate.toFixed(1) },
+      w100: { expectancy: windows.w100.expectancy.toFixed(2), winRate: windows.w100.winRate.toFixed(1) },
+      w300: { expectancy: windows.w300.expectancy.toFixed(2), winRate: windows.w300.winRate.toFixed(1) },
     },
   };
 }

@@ -13,11 +13,15 @@ CREATE TABLE IF NOT EXISTS signals (
   tp2 NUMERIC NOT NULL,
   tp3 NUMERIC NOT NULL,
   sl NUMERIC NOT NULL,
-  status TEXT DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'HIT_TP1', 'HIT_TP2', 'HIT_TP3', 'HIT_SL', 'EXPIRED')),
+  status TEXT DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'HIT_TP1', 'HIT_TP2', 'HIT_TP3', 'HIT_SL', 'BREAKEVEN', 'EXPIRED', 'REJECTED')),
   confidence NUMERIC DEFAULT 0,
   conditions_met JSONB DEFAULT '{}',
   adx_value NUMERIC DEFAULT 0,
   atr_value NUMERIC DEFAULT 0,
+  closed_at TIMESTAMPTZ,
+  exit_price NUMERIC,
+  realized_r NUMERIC,
+  monitor_updated_at TIMESTAMPTZ,
   timeframe TEXT DEFAULT 'M15'
 );
 

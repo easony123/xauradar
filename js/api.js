@@ -71,6 +71,84 @@ function isClosedSignalStatus(status) {
   return [...new Set(['HIT_TP1', 'HIT_TP2', 'HIT_TP3', 'HIT_SL', 'BREAKEVEN', 'EXPIRED'])].includes(normalizeSignalStatus(status));
 }
 
+function getSignalStatusR(status) {
+  const normalized = normalizeSignalStatus(status);
+  if (normalized === 'HIT_TP1') return 1.0;
+  if (normalized === 'HIT_TP2') return 2.0;
+  if (normalized === 'HIT_TP3') return 3.0;
+  if (normalized === 'HIT_SL') return -1.0;
+  if (normalized === 'BREAKEVEN') return 0.0;
+  if (normalized === 'EXPIRED') return -0.2;
+  return 0;
+}
+
+function getSignalOrigStopDistance(signal) {
+  const entry = parseNumber(signal?.entry_price, NaN);
+  if (!Number.isFinite(entry)) return NaN;
+
+  const conditions = tryParseJson(signal?.conditions_met) || {};
+  const origSl = parseNumber(conditions?.orig_sl, NaN);
+  if (Number.isFinite(origSl) && Math.abs(origSl - entry) > 1e-9) {
+    return Math.abs(entry - origSl);
+  }
+
+  const rrValue = parseNumber(signal?.rr_value, NaN);
+  const tp2 = parseNumber(signal?.tp2, NaN);
+  if (Number.isFinite(rrValue) && rrValue > 0 && Number.isFinite(tp2)) {
+    return Math.abs(tp2 - entry) / rrValue;
+  }
+
+  const sl = parseNumber(signal?.stop_loss ?? signal?.sl, NaN);
+  if (Number.isFinite(sl)) {
+    return Math.abs(entry - sl);
+  }
+
+  return NaN;
+}
+
+function getSignalRealizedR(signal) {
+  const stored = parseNumber(signal?.realized_r, NaN);
+  if (Number.isFinite(stored)) return stored;
+
+  const entry = parseNumber(signal?.entry_price, NaN);
+  const exitPrice = parseNumber(signal?.exit_price, NaN);
+  const stopDistance = getSignalOrigStopDistance(signal);
+  const conditions = tryParseJson(signal?.conditions_met) || {};
+  const side = signal?.type || signal?.signal_type || 'BUY';
+
+  if (Number.isFinite(entry) && Number.isFinite(exitPrice) && Number.isFinite(stopDistance) && stopDistance > 0) {
+    const exitR = getTradePriceMove(side, entry, exitPrice) / stopDistance;
+    const tp1Applied = Boolean(conditions?.tp1_be_applied || conditions?.tp1_hit_at);
+    if (!tp1Applied) return exitR;
+
+    const tp1 = parseNumber(signal?.tp1, NaN);
+    const tp1Fraction = clamp(parseNumber(conditions?.tp1_fraction, 0.4), 0.05, 0.95);
+    const tp1R = Number.isFinite(tp1) ? getTradePriceMove(side, entry, tp1) / stopDistance : 0;
+    return (tp1Fraction * tp1R) + ((1 - tp1Fraction) * exitR);
+  }
+
+  return getSignalStatusR(signal?.status);
+}
+
+function getSignalRealizedPips(signal) {
+  const realizedR = getSignalRealizedR(signal);
+  const stopDistance = getSignalOrigStopDistance(signal);
+  if (Number.isFinite(realizedR) && Number.isFinite(stopDistance) && stopDistance > 0) {
+    return realizedR * (stopDistance / API_XAU_PIP_SIZE);
+  }
+
+  const entry = parseNumber(signal?.entry_price, NaN);
+  if (!Number.isFinite(entry)) return 0;
+
+  const status = normalizeSignalStatus(signal?.status);
+  let move = 0;
+  if (status === 'HIT_TP1') move = Math.abs(parseNumber(signal?.tp1, 0) - entry);
+  if (status === 'HIT_TP2') move = Math.abs(parseNumber(signal?.tp2, 0) - entry);
+  if (status === 'HIT_TP3') move = Math.abs(parseNumber(signal?.tp3, 0) - entry);
+  if (status === 'HIT_SL') move = -Math.abs(parseNumber(signal?.stop_loss ?? signal?.sl, 0) - entry);
+  return Number.isFinite(move) ? toXauPipsApi(move) : 0;
+}
+
 function parseTradeMetadata(value) {
   const parsed = tryParseJson(value);
   return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
@@ -1278,24 +1356,13 @@ async function fetchPerformanceStats() {
 
     const realizedStatuses = ['HIT_TP1', 'HIT_TP2', 'HIT_TP3', 'HIT_SL', 'BREAKEVEN', 'EXPIRED'];
     const realizedRows = tradableRows.filter((row) => realizedStatuses.includes(normalizeSignalStatus(row.status)));
-    const winRows = realizedRows.filter((row) => isWinningSignalStatus(row.status));
-    const lossRows = realizedRows.filter((row) => normalizeSignalStatus(row.status) === 'HIT_SL');
+    const winRows = realizedRows.filter((row) => getSignalRealizedR(row) > 0);
+    const lossRows = realizedRows.filter((row) => getSignalRealizedR(row) < 0);
     const tp1SignalCount = tradableRows.filter((row) => {
       const status = normalizeSignalStatus(row.status);
       if (['HIT_TP1', 'HIT_TP2', 'HIT_TP3'].includes(status)) return true;
       return Boolean(tryParseJson(row.conditions_met)?.tp1_hit_at);
     }).length;
-
-    const mapStatusR = (status) => {
-      const normalized = normalizeSignalStatus(status);
-      if (normalized === 'HIT_TP1') return 1.0;
-      if (normalized === 'HIT_TP2') return 2.0;
-      if (normalized === 'HIT_TP3') return 3.0;
-      if (normalized === 'HIT_SL') return -1.0;
-      if (normalized === 'BREAKEVEN') return 0.0;
-      if (normalized === 'EXPIRED') return -0.2;
-      return 0;
-    };
 
     const calcMetrics = (rows) => {
       if (!rows || rows.length === 0) {
@@ -1312,14 +1379,20 @@ async function fetchPerformanceStats() {
         };
       }
 
-      const tp1 = rows.filter((s) => ['HIT_TP1', 'HIT_TP2', 'HIT_TP3'].includes(s.status)).length;
+      const tp1 = rows.filter((s) => {
+        const status = normalizeSignalStatus(s.status);
+        if (['HIT_TP1', 'HIT_TP2', 'HIT_TP3'].includes(status)) return true;
+        return Boolean(tryParseJson(s.conditions_met)?.tp1_hit_at);
+      }).length;
       const tp2 = rows.filter((s) => ['HIT_TP2', 'HIT_TP3'].includes(s.status)).length;
       const tp3 = rows.filter((s) => s.status === 'HIT_TP3').length;
-      const sl = rows.filter((s) => s.status === 'HIT_SL').length;
+      const sl = rows.filter((s) => getSignalRealizedR(s) < 0).length;
 
-      const rvals = rows.map((s) => mapStatusR(s.status));
+      const rvals = rows.map((s) => getSignalRealizedR(s));
+      const positiveR = rvals.filter((value) => value > 0);
+      const winCount = positiveR.length;
       const expectancy = rvals.reduce((a, b) => a + b, 0) / rows.length;
-      const avgRR = rvals.reduce((a, b) => a + b, 0) / rows.length;
+      const avgRR = positiveR.length > 0 ? positiveR.reduce((a, b) => a + b, 0) / positiveR.length : 0;
 
       let equity = 0;
       let peak = 0;
@@ -1333,7 +1406,7 @@ async function fetchPerformanceStats() {
 
       return {
         count: rows.length,
-        winRate: (tp1 / rows.length) * 100,
+        winRate: (winCount / rows.length) * 100,
         expectancy,
         avgRR,
         drawdown: maxDD,
@@ -1354,27 +1427,10 @@ async function fetchPerformanceStats() {
       windowMetrics[n] = calcMetrics(realizedRows.slice(0, n));
     });
 
-    let totalPips = 0;
-    realizedRows.forEach((s) => {
-      const entry = parseNumber(s.entry_price, NaN);
-      const tp1 = parseNumber(s.tp1, NaN);
-      const tp2 = parseNumber(s.tp2, NaN);
-      const tp3 = parseNumber(s.tp3, NaN);
-      const sl = parseNumber(s.stop_loss ?? s.sl, NaN);
-      const status = String(s.status || '').toUpperCase();
-
-      if (!Number.isFinite(entry)) return;
-
-      let move = 0;
-      if (status === 'HIT_TP1' && Number.isFinite(tp1)) move = Math.abs(tp1 - entry);
-      if (status === 'HIT_TP2' && Number.isFinite(tp2)) move = Math.abs(tp2 - entry);
-      if (status === 'HIT_TP3' && Number.isFinite(tp3)) move = Math.abs(tp3 - entry);
-      if (status === 'HIT_SL' && Number.isFinite(sl)) move = -Math.abs(sl - entry);
-      if (status === 'EXPIRED') move = 0;
-
-      const pips = toXauPipsApi(move);
-      if (Number.isFinite(pips)) totalPips += pips;
-    });
+    const totalPips = realizedRows.reduce((sum, signal) => {
+      const pips = getSignalRealizedPips(signal);
+      return Number.isFinite(pips) ? sum + pips : sum;
+    }, 0);
 
     return {
       totalSignals: tradableRows.length,
