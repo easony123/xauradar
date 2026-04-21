@@ -1331,6 +1331,22 @@ def build_signal_close_metrics(signal_row: dict, exit_price: float, conditions: 
     }
 
 
+def resolve_signal_exit_price(signal_row: dict, closed_status: str, fallback_price: float = 0.0) -> float:
+    stored_exit_price = safe_float(signal_row.get("exit_price"), 0)
+    if stored_exit_price > 0:
+        return stored_exit_price
+
+    status_price_map = {
+        "HIT_TP1": safe_float(signal_row.get("tp1"), fallback_price),
+        "HIT_TP2": safe_float(signal_row.get("tp2"), fallback_price),
+        "HIT_TP3": safe_float(signal_row.get("tp3"), fallback_price),
+        "HIT_SL": safe_float(signal_row.get("sl"), fallback_price),
+        "BREAKEVEN": safe_float(signal_row.get("entry_price"), fallback_price),
+        "EXPIRED": safe_float(fallback_price, safe_float(signal_row.get("entry_price"), 0)),
+    }
+    return safe_float(status_price_map.get(str(closed_status or "").upper()), fallback_price)
+
+
 def compute_position_size(balance: float, risk_percent: float, entry: float, sl: float) -> float:
     risk_amount = max(safe_float(balance, 0), 0) * max(safe_float(risk_percent, 0), 0) / 100.0
     stop_distance = max(abs(safe_float(entry, 0) - safe_float(sl, 0)), 0.0001)
@@ -1757,7 +1773,15 @@ def sync_demo_trades_for_active_signals(active_by_lane: dict[str, dict]) -> None
         create_demo_trades_for_signal(active_signal)
 
 
-def reconcile_demo_trades_for_closed_signals(current_price: float) -> None:
+def reconcile_demo_trades_for_closed_signals(current_price: float) -> dict[str, Any]:
+    summary = {
+        "scanned_open_trades": 0,
+        "closed_signal_count": 0,
+        "recovered_count": 0,
+        "failed_count": 0,
+        "signal_ids": [],
+        "trade_ids": [],
+    }
     try:
         open_resp = (
             supabase.table("demo_trades")
@@ -1768,11 +1792,13 @@ def reconcile_demo_trades_for_closed_signals(current_price: float) -> None:
         open_rows = open_resp.data or []
     except Exception as e:
         print(f"  WARNING: stale demo trade scan failed: {type(e).__name__}: {e}")
-        return
+        summary["failed_count"] = 1
+        return summary
 
+    summary["scanned_open_trades"] = len(open_rows)
     signal_ids = sorted({row.get("signal_id") for row in open_rows if row.get("signal_id")})
     if not signal_ids:
-        return
+        return summary
 
     try:
         signal_resp = (
@@ -1784,14 +1810,34 @@ def reconcile_demo_trades_for_closed_signals(current_price: float) -> None:
         signal_rows = signal_resp.data or []
     except Exception as e:
         print(f"  WARNING: stale demo signal lookup failed: {type(e).__name__}: {e}")
-        return
+        summary["failed_count"] = max(summary["failed_count"], 1)
+        return summary
 
     for signal_row in signal_rows:
         signal_status = str(signal_row.get("status", "")).upper()
         if signal_status not in SIGNAL_STATUS_CLOSED:
             continue
+        summary["closed_signal_count"] += 1
+        summary["signal_ids"].append(str(signal_row.get("id")))
+        exit_price = resolve_signal_exit_price(signal_row, signal_status, current_price)
         print(f"  Reconciling stale open demo trades for signal {signal_row.get('id')} status {signal_status}")
-        settle_demo_trades_for_signal(signal_row, signal_status, current_price)
+        result = settle_demo_trades_for_signal(signal_row, signal_status, exit_price)
+        summary["recovered_count"] += int(result.get("closed_count", 0))
+        summary["failed_count"] += int(result.get("failed_count", 0))
+        summary["trade_ids"].extend(result.get("trade_ids", []))
+
+    if summary["recovered_count"] > 0 or summary["failed_count"] > 0:
+        record_engine_runtime_event(
+            "DEMO_TRADE_RECONCILE",
+            market_price=safe_float(current_price, 0),
+            meta=summary,
+        )
+        print(
+            "  Demo trade reconciliation summary: "
+            f"recovered={summary['recovered_count']} failed={summary['failed_count']} "
+            f"scanned={summary['scanned_open_trades']}"
+        )
+    return summary
 
 
 def settle_demo_trades_for_signal(
@@ -2842,6 +2888,10 @@ def run_signal_engine() -> None:
     active_rows = fetch_active_signal_rows()
     active_by_lane, duplicate_active_rows = partition_active_signals(active_rows)
     sync_demo_trades_for_active_signals(active_by_lane)
+    spread_info = fetch_latest_spread()
+    latest_tick = fetch_latest_tick()
+    reconcile_price = safe_float(latest_tick.get("price"), safe_float(latest_tick.get("mid"), 0))
+    reconcile_summary = reconcile_demo_trades_for_closed_signals(reconcile_price)
     record_engine_runtime_event(
         "STARTED",
         meta={
@@ -2849,21 +2899,23 @@ def run_signal_engine() -> None:
             "active_lanes": list(active_by_lane.keys()),
             "active_count": len(active_rows),
             "duplicate_active_count": len(duplicate_active_rows),
+            "reconciled_demo_trades": reconcile_summary.get("recovered_count", 0),
+            "reconcile_failures": reconcile_summary.get("failed_count", 0),
         },
     )
     if not market_clock["market_open"]:
         print(f"  Market closed ({market_clock['reason']}): skipping candle fetch, signal generation, and signal expiry checks.")
         record_engine_runtime_event(
             "ABORTED",
+            market_price=reconcile_price,
             meta={
                 "reason": market_clock["reason"],
                 "market_clock": market_clock,
+                "reconciled_demo_trades": reconcile_summary.get("recovered_count", 0),
+                "reconcile_failures": reconcile_summary.get("failed_count", 0),
             },
         )
         return
-
-    spread_info = fetch_latest_spread()
-    latest_tick = fetch_latest_tick()
 
     check_market_tick_freshness(warn_minutes=10, alert_minutes=15)
     check_engine_runtime_health(latest_tick, market_clock)
@@ -2926,7 +2978,6 @@ def run_signal_engine() -> None:
     df_h4 = calculate_confirm_indicators(df_h4)
 
     current_price = safe_float(df_m15.iloc[-1]["Close"], 0)
-    reconcile_demo_trades_for_closed_signals(current_price)
     dxy = fetch_dxy_quote()
     session = get_session_context()
     news = get_news_context()

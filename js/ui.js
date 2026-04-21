@@ -2880,15 +2880,19 @@ function renderDemoDashboard(perf, curve = [], trades = [], events = []) {
       const laneText = String(t.lane || 'intraday').toUpperCase();
       const statusText = String(t.effectiveStatus || t.status || '--').toUpperCase();
       const pnl = Number(t.livePnlUsd ?? t.pnl_usd ?? 0);
-      const pnlCls = statusText === 'BREAKEVEN' ? 'text-muted' : (pnl >= 0 ? 'profit' : 'loss');
+      const isSettling = statusText === 'SETTLING';
+      const pnlCls = (statusText === 'BREAKEVEN' || isSettling) ? 'text-muted' : (pnl >= 0 ? 'profit' : 'loss');
+      const pnlText = isSettling ? 'Pending' : formatMoney(pnl);
       return `
         <div class="demo-trade-row">
           <div class="demo-trade-row__left">
             <div class="demo-trade-row__meta">${laneText} | ${side} | ${statusText}</div>
-            <div class="demo-trade-row__sub">Entry ${Number(t.entry || 0).toFixed(2)} | SL ${Number(t.sl || 0).toFixed(2)}</div>
+            <div class="demo-trade-row__sub">${isSettling
+              ? `Entry ${Number(t.entry || 0).toFixed(2)} | Awaiting reconciliation`
+              : `Entry ${Number(t.entry || 0).toFixed(2)} | SL ${Number(t.sl || 0).toFixed(2)}`}</div>
           </div>
           <div class="demo-trade-row__right">
-            <div class="demo-trade-row__pnl ${pnlCls}">${formatMoney(pnl)}</div>
+            <div class="demo-trade-row__pnl ${pnlCls}">${pnlText}</div>
             <div class="demo-trade-row__sub">${formatMalaysiaTime(t.opened_at, true)}</div>
           </div>
         </div>

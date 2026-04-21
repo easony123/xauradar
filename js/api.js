@@ -166,9 +166,7 @@ function getEffectiveTradeStatus(tradeStatus, signalStatus) {
 
   const parentSignalStatus = normalizeSignalStatus(signalStatus);
   if (!parentSignalStatus || parentSignalStatus === 'ACTIVE') return 'OPEN';
-  if (parentSignalStatus === 'HIT_SL') return 'LOSS';
-  if (isWinningSignalStatus(parentSignalStatus)) return 'WIN';
-  if (isNeutralSignalStatus(parentSignalStatus)) return parentSignalStatus;
+  if (isClosedSignalStatus(parentSignalStatus)) return 'SETTLING';
   return currentTradeStatus;
 }
 
@@ -225,6 +223,7 @@ function buildDemoPerformance(account, trades = [], equityPoints = [], events = 
     const realizedPnlPips = parseNumber(metadata.realized_pnl_pips, parseNumber(trade.pnl_pips, 0));
     const effectiveStatus = getEffectiveTradeStatus(tradeStatus, signalStatus);
     const isEffectiveOpen = effectiveStatus === 'OPEN';
+    const isSettlementPending = effectiveStatus === 'SETTLING';
 
     let unrealizedPnlUsd = 0;
     let livePnlUsd = parseNumber(trade.pnl_usd, realizedPnlUsd);
@@ -246,6 +245,7 @@ function buildDemoPerformance(account, trades = [], equityPoints = [], events = 
       signal_status: signalStatus || null,
       effectiveStatus,
       isEffectiveOpen,
+      isSettlementPending,
       realizedPnlUsd,
       unrealizedPnlUsd,
       livePnlUsd,
@@ -257,7 +257,10 @@ function buildDemoPerformance(account, trades = [], equityPoints = [], events = 
   });
 
   const effectiveOpenTrades = normalizedTrades.filter((trade) => trade.isEffectiveOpen);
-  const closedTrades = normalizedTrades.filter((trade) => !trade.isEffectiveOpen && trade.effectiveStatus !== 'OPEN');
+  const settlementPendingTrades = normalizedTrades.filter((trade) => trade.isSettlementPending);
+  const closedTrades = normalizedTrades.filter(
+    (trade) => !trade.isEffectiveOpen && !trade.isSettlementPending && trade.effectiveStatus !== 'OPEN',
+  );
   const wins = closedTrades.filter((trade) => trade.effectiveStatus === 'WIN');
   const losses = closedTrades.filter((trade) => trade.effectiveStatus === 'LOSS');
   const totalClosed = closedTrades.length;
@@ -341,6 +344,7 @@ function buildDemoPerformance(account, trades = [], equityPoints = [], events = 
     trades: normalizedTrades,
     events: normalizedEvents,
     effectiveOpenTrades,
+    settlementPendingTrades,
   };
 }
 
