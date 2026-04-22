@@ -1391,6 +1391,18 @@ function renderSignalHero(decisionRun, signalsByLane = {}, currentPrice = null) 
   const heroChip = document.querySelector('.hero-chip');
   if (heroChip) heroChip.textContent = 'Market Signals';
 
+  const toValidTs = (value) => {
+    if (!value) return null;
+    const date = value instanceof Date ? value : new Date(value);
+    const ts = date.getTime();
+    return Number.isFinite(ts) ? ts : null;
+  };
+  const formatLastUpdatedText = (value) => {
+    const ts = toValidTs(value);
+    if (!ts) return 'Last updated: waiting for signal engine';
+    return `Last updated: ${formatMalaysiaTime(ts, true)} | ${formatTimeAgo(ts)}`;
+  };
+
   const selectedLane = getSelectedSignalLane();
   const lanes = ['intraday', 'swing'];
   const laneModels = lanes.map((lane) => {
@@ -1400,16 +1412,23 @@ function renderSignalHero(decisionRun, signalsByLane = {}, currentPrice = null) 
       ? { ...(decision || {}), ...activeSignal, decision_state: decision?.decision_state || 'IN_TRADE', lane }
       : decision;
   }).filter(Boolean);
+  const freshestUpdateTs = [decisionRun?.created_at]
+    .concat(laneModels.flatMap((signal) => [signal?.monitor_updated_at, signal?.created_at]))
+    .map(toValidTs)
+    .filter((ts) => ts !== null)
+    .reduce((latest, ts) => Math.max(latest, ts), 0);
+  const lastUpdatedText = formatLastUpdatedText(freshestUpdateTs || null);
 
   if (laneModels.length === 0) {
     hero.innerHTML = `
       <div class="signal-hero__badge waiting">Waiting for lane decisions...</div>
-      <div class="signal-hero__time">Price refresh: 3m | Signal bot: 5m</div>
+      <div class="signal-hero__time">${lastUpdatedText}</div>
     `;
     return;
   }
 
   hero.innerHTML = `
+    <div class="signal-hero__time">${lastUpdatedText}</div>
     <div class="signal-hero-grid">
       ${lanes.map((lane) => {
         const expanded = isSignalLaneExpanded(lane);
