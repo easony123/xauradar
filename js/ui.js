@@ -1399,8 +1399,8 @@ function renderSignalHero(decisionRun, signalsByLane = {}, currentPrice = null) 
   };
   const formatLastUpdatedText = (value) => {
     const ts = toValidTs(value);
-    if (!ts) return 'Last updated: waiting for signal engine';
-    return `Last updated: ${formatMalaysiaTime(ts, true)} | ${formatTimeAgo(ts)}`;
+    if (!ts) return 'Signal refresh: waiting for engine | target every 3m';
+    return `Signal refresh: ${formatMalaysiaTime(ts, true)} | refresh target: every 3m`;
   };
 
   const selectedLane = getSelectedSignalLane();
