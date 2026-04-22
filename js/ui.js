@@ -1412,12 +1412,13 @@ function renderSignalHero(decisionRun, signalsByLane = {}, currentPrice = null) 
       ? { ...(decision || {}), ...activeSignal, decision_state: decision?.decision_state || 'IN_TRADE', lane }
       : decision;
   }).filter(Boolean);
-  const freshestUpdateTs = [decisionRun?.created_at]
-    .concat(laneModels.flatMap((signal) => [signal?.monitor_updated_at, signal?.created_at]))
+  const latestEngineRunTs = toValidTs(decisionRun?.created_at);
+  const fallbackSignalTs = laneModels
+    .flatMap((signal) => [signal?.created_at])
     .map(toValidTs)
     .filter((ts) => ts !== null)
     .reduce((latest, ts) => Math.max(latest, ts), 0);
-  const lastUpdatedText = formatLastUpdatedText(freshestUpdateTs || null);
+  const lastUpdatedText = formatLastUpdatedText(latestEngineRunTs || fallbackSignalTs || null);
 
   if (laneModels.length === 0) {
     hero.innerHTML = `
