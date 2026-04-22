@@ -1,8 +1,6 @@
 name: XAUUSD Signal Bot
 
 on:
-  schedule:
-    - cron: '2-59/5 * * * *'  # Every 5 minutes, offset from top-of-hour load
   workflow_dispatch:  # Manual trigger
 
 permissions:
@@ -39,6 +37,11 @@ jobs:
           [ -n "$TWELVE_DATA_API_KEY" ] || (echo "Missing secret: TWELVE_DATA_API_KEY" && exit 1)
           [ -n "$SUPABASE_URL" ] || (echo "Missing secret: SUPABASE_URL" && exit 1)
           [ -n "$SUPABASE_SERVICE_KEY" ] || (echo "Missing secret: SUPABASE_SERVICE_KEY" && exit 1)
+
+      - name: Validate Supabase service key privileges
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python validate_supabase_service_key.py
 
       - name: Workflow start marker
         run: echo "Signal bot workflow started at $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
