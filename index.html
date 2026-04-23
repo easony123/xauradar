@@ -31,6 +31,15 @@
     <symbol id="icon-stats" viewBox="0 0 24 24">
       <path d="M5 20V11M12 20V7M19 20V4M3 20h18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     </symbol>
+    <symbol id="icon-learn" viewBox="0 0 24 24">
+      <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H20v14.5A1.5 1.5 0 0 0 18.5 17H6.5A2.5 2.5 0 0 0 4 19.5v-13Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M8 8h8M8 11h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="icon-more" viewBox="0 0 24 24">
+      <circle cx="5" cy="12" r="1.8" fill="currentColor"/>
+      <circle cx="12" cy="12" r="1.8" fill="currentColor"/>
+      <circle cx="19" cy="12" r="1.8" fill="currentColor"/>
+    </symbol>
     <symbol id="icon-switch" viewBox="0 0 24 24">
       <path d="M9 8l3-3 3 3M15 16l-3 3-3-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     </symbol>
@@ -100,6 +109,12 @@
             <svg class="icon-svg" aria-hidden="true"><use href="#icon-chart"></use></svg>
           </span>
           <span class="nav-item__label">Chart</span>
+        </button>
+        <button class="nav-item sidebar-nav__item" data-page="learn">
+          <span class="nav-item__icon">
+            <svg class="icon-svg" aria-hidden="true"><use href="#icon-learn"></use></svg>
+          </span>
+          <span class="nav-item__label">Learn</span>
         </button>
         <button class="nav-item sidebar-nav__item" data-page="history">
           <span class="nav-item__icon">
@@ -342,6 +357,54 @@
             </div>
           </div>
         </section>
+        <section class="page notranslate" id="page-learn" translate="no">
+          <div id="learn-root" class="learn-platform-root" aria-live="polite"></div>
+        </section>
+
+        <section class="page" id="page-more">
+          <section class="more-hero card card--hero-light">
+            <div class="card__body">
+              <div class="more-hero__eyebrow">Quick access</div>
+              <h2 class="more-hero__title">Open review, news, and stats without crowding the mobile nav.</h2>
+              <p class="more-hero__copy">Use this space to review past signals, check event risk, and understand your numbers before the next setup.</p>
+            </div>
+          </section>
+
+          <section class="more-grid">
+            <article class="card more-card">
+              <div class="card__header">
+                <span class="card__title">History</span>
+                <span class="badge-inline">Review</span>
+              </div>
+              <div class="card__body">
+                <p class="more-card__copy">Look back at past signals and see whether they reached TP or SL.</p>
+                <button type="button" class="learn-primary-action learn-primary-action--compact learn-nav-link" data-target-page="history">Open History</button>
+              </div>
+            </article>
+
+            <article class="card more-card">
+              <div class="card__header">
+                <span class="card__title">Calendar</span>
+                <span class="badge-inline">Risk</span>
+              </div>
+              <div class="card__body">
+                <p class="more-card__copy">Check high-impact events before deciding whether the setup is still tradeable.</p>
+                <button type="button" class="learn-primary-action learn-primary-action--compact learn-nav-link" data-target-page="calendar">Open Calendar</button>
+              </div>
+            </article>
+
+            <article class="card more-card">
+              <div class="card__header">
+                <span class="card__title">Stats</span>
+                <span class="badge-inline">Review</span>
+              </div>
+              <div class="card__body">
+                <p class="more-card__copy">Use win rate, TP breakdown, and risk tools to understand your results properly.</p>
+                <button type="button" class="learn-primary-action learn-primary-action--compact learn-nav-link" data-target-page="stats">Open Stats</button>
+              </div>
+            </article>
+          </section>
+        </section>
         <section class="page" id="page-chart">
           <div class="chart-fullscreen">
             <div class="chart-toolbar">
@@ -516,23 +579,17 @@
           </span>
           <span class="nav-item__label">Chart</span>
         </button>
-        <button class="nav-item" data-page="history">
+        <button class="nav-item" data-page="learn">
           <span class="nav-item__icon">
-            <svg class="icon-svg" aria-hidden="true"><use href="#icon-history"></use></svg>
+            <svg class="icon-svg" aria-hidden="true"><use href="#icon-learn"></use></svg>
           </span>
-          <span class="nav-item__label">History</span>
+          <span class="nav-item__label">Learn</span>
         </button>
-        <button class="nav-item" data-page="calendar">
+        <button class="nav-item" data-page="more">
           <span class="nav-item__icon">
-            <svg class="icon-svg" aria-hidden="true"><use href="#icon-calendar"></use></svg>
+            <svg class="icon-svg" aria-hidden="true"><use href="#icon-more"></use></svg>
           </span>
-          <span class="nav-item__label">Calendar</span>
-        </button>
-        <button class="nav-item" data-page="stats">
-          <span class="nav-item__icon">
-            <svg class="icon-svg" aria-hidden="true"><use href="#icon-stats"></use></svg>
-          </span>
-          <span class="nav-item__label">Stats</span>
+          <span class="nav-item__label">More</span>
         </button>
       </nav>
     </main>
@@ -541,6 +598,7 @@
   <script src="js/api.js"></script>
   <script src="js/chart.js"></script>
   <script src="js/ui.js"></script>
+  <script src="js/learn-platform.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

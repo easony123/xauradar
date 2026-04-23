@@ -314,6 +314,7 @@ async function boot() {
   UI.initTheme();
   UI.initTranslateToggle();
   UI.initNavigation();
+  UI.initLearnPage();
   UI.initDashboardSwitch();
   UI.initPolymarketControls();
   UI.initChartTime();

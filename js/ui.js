@@ -16,9 +16,14 @@ const POLY_CATEGORY_KEY = 'xauradar_poly_category';
 const POLY_SORT_KEY = 'xauradar_poly_sort';
 const POLY_VIEW_KEY = 'xauradar_poly_view';
 const POLY_BET_TYPE_KEY = 'xauradar_poly_bet_type';
+const LEARN_PROGRESS_KEY = 'xauradar_learn_progress_v1';
+const LEARN_QUIZ_KEY = 'xauradar_learn_quiz_v1';
 
 let activeDashboardMode = 'xau';
 let lastXauPage = 'signal';
+let currentLearnLessonId = 'how-xauusd-moves';
+let learnQuizFeedback = {};
+let learnSelectedAnswers = {};
 const polymarketState = {
   btcTick: null,
   markets: [],
@@ -64,6 +69,776 @@ const POLY_MARKET_TYPE_LABELS = {
   price_range: 'Price Range',
   hit_price: 'Hit Price',
 };
+const MORE_PAGE_TARGETS = new Set(['history', 'calendar', 'stats']);
+const LEARN_UI_COPY = {
+  en: {
+    heroEyebrow: 'Learn XAUUSD with context',
+    heroTitle: 'Turn signals into chart understanding, one short lesson at a time.',
+    heroBody: 'Built for Malaysian beginners who want practical technical analysis, not trading hype.',
+    startLesson: 'Start Lesson 1',
+    continueLesson: 'Continue Lesson',
+    progressTitle: 'Your Progress',
+    currentLesson: 'Current lesson',
+    nextAction: 'Next action',
+    continueTitle: 'Continue Learning',
+    openLesson: 'Open Lesson',
+    markComplete: 'Mark Complete',
+    completed: 'Completed',
+    openChart: 'Open Chart',
+    openSignal: 'Open Signal',
+    openCalendar: 'Open Calendar',
+    openHistory: 'Open History',
+    openStats: 'Open Stats',
+    modules: 'Course Modules',
+    beginnerPath: 'Beginner Path',
+    objective: 'Objective',
+    coreIdea: 'Core Idea',
+    whyItMatters: 'Why It Matters',
+    example: 'XAUUSD Example',
+    beginnerMistake: 'Beginner Mistake',
+    riskNote: 'Risk Note',
+    exercise: 'Guided Exercise',
+    apply: 'Apply It In The App',
+    quickCheck: 'Quick Check',
+    chooseToSee: 'Choose an answer to see the explanation.',
+    lessonOf: 'Lesson',
+    of: 'of',
+    min: 'min',
+    nextActionText: 'Open the first lesson and finish the quick check.',
+    languageBadge: 'EN + 中文',
+  },
+  zh: {
+    heroEyebrow: '用真实情境学 XAUUSD',
+    heroTitle: '把信号看懂成图表逻辑，一次学一小课就够。',
+    heroBody: '这套内容是给马来西亚初学者的，重点是实用技术分析，不是喊单式话术。',
+    startLesson: '开始第 1 课',
+    continueLesson: '继续学习',
+    progressTitle: '你的进度',
+    currentLesson: '当前课程',
+    nextAction: '下一步',
+    continueTitle: '继续这一课',
+    openLesson: '打开课程',
+    markComplete: '标记完成',
+    completed: '已完成',
+    openChart: '打开图表',
+    openSignal: '打开信号',
+    openCalendar: '打开日历',
+    openHistory: '打开历史',
+    openStats: '打开统计',
+    modules: '课程目录',
+    beginnerPath: '新手路径',
+    objective: '学习目标',
+    coreIdea: '核心概念',
+    whyItMatters: '为什么重要',
+    example: 'XAUUSD 例子',
+    beginnerMistake: '新手常犯错',
+    riskNote: '风险提醒',
+    exercise: '练习任务',
+    apply: '回到 App 实战',
+    quickCheck: '快速检查',
+    chooseToSee: '先选一个答案，再看解释。',
+    lessonOf: '第',
+    of: '课 / 共',
+    min: '分钟',
+    nextActionText: '先打开第一课，做完快速检查再继续。',
+    languageBadge: 'EN + 中文',
+  },
+};
+const LEARN_LESSONS = [
+  {
+    id: 'how-xauusd-moves',
+    order: 1,
+    estimatedMinutes: 4,
+    ctaTarget: 'calendar',
+    ctaLabel: { en: 'Open Calendar', zh: '打开日历' },
+    quiz: [
+      {
+        id: 'xau-driver-1',
+        correctAnswer: 'b',
+        answers: {
+          en: [
+            { key: 'a', text: 'Only candle patterns matter for gold.' },
+            { key: 'b', text: 'Gold can react sharply to USD, yields, and big US news.' },
+            { key: 'c', text: 'Gold always moves slowly during data releases.' },
+          ],
+          zh: [
+            { key: 'a', text: '黄金只看K线形态就够了。' },
+            { key: 'b', text: '黄金会明显受到美元、收益率和美国重磅数据影响。' },
+            { key: 'c', text: '数据公布时，黄金一定会慢慢走。' },
+          ],
+        },
+        explanation: {
+          en: 'XAUUSD is not random. Macro drivers can change the speed and direction of the move very quickly.',
+          zh: 'XAUUSD 不是随机乱走。宏观因素会很快改变波动速度和方向。',
+        },
+      },
+      {
+        id: 'xau-driver-2',
+        correctAnswer: 'c',
+        answers: {
+          en: [
+            { key: 'a', text: 'Chase immediately because volatility is exciting.' },
+            { key: 'b', text: 'Ignore the calendar and focus only on indicators.' },
+            { key: 'c', text: 'Check the event calendar first before forcing an entry.' },
+          ],
+          zh: [
+            { key: 'a', text: '波动大就立刻追进去。' },
+            { key: 'b', text: '不用看日历，只看指标就好。' },
+            { key: 'c', text: '先看经济日历，再决定要不要进场。' },
+          ],
+        },
+        explanation: {
+          en: 'Context comes first. Near major events, a clean setup can fail for reasons outside the pattern itself.',
+          zh: '先看情境再看形态。重大事件附近，再漂亮的形态也可能被消息打坏。',
+        },
+      },
+    ],
+    copy: {
+      en: {
+        title: 'How XAUUSD Moves',
+        objective: 'Understand the main forces behind gold before trying to read any setup.',
+        coreIdea: 'Gold reacts to USD strength, yields, risk sentiment, and major US data. The chart matters, but the context matters too.',
+        whyItMatters: 'If you know what is moving gold, you stop treating every candle as a mystery and start reading the move with more discipline.',
+        example: 'If CPI comes in hot and yields jump, gold can drop fast even when the chart looked calm one hour earlier.',
+        beginnerMistake: 'Looking at the signal only and forgetting that major news can completely change the quality of the setup.',
+        riskNote: 'Before entering XAUUSD, always check whether a high-impact event is near.',
+        exercise: 'Open Calendar and identify the next high-impact event that could shake gold today or this week.',
+        ctaCopy: 'Use the Calendar page to see whether the market backdrop is calm or dangerous before the next setup.',
+        focusTitle: 'Context first',
+        focusBody: 'Read the macro backdrop before you trust the chart too much.',
+      },
+      zh: {
+        title: 'XAUUSD 为什么会动',
+        objective: '先理解影响黄金的主要力量，再去判断图表形态。',
+        coreIdea: '黄金会受到美元强弱、收益率、避险情绪和美国重磅数据影响。图表重要，但背景更重要。',
+        whyItMatters: '当你知道黄金为什么在动，就不会把每一根K线都当成谜题，也更容易保持纪律。',
+        example: '如果 CPI 高于预期、收益率一起上冲，黄金可能会突然下跌，就算一小时前图表看起来还很平静。',
+        beginnerMistake: '只看信号，不看重大新闻，结果把原本还不错的形态当成一定能做。',
+        riskNote: '做 XAUUSD 前，先确认附近有没有高影响事件。',
+        exercise: '打开经济日历，找出今天或本周最可能影响黄金的高影响事件。',
+        ctaCopy: '先用日历确认市场背景，再决定这个 setup 值不值得碰。',
+        focusTitle: '先看背景',
+        focusBody: '别只盯图表，先知道黄金为什么可能突然加速。',
+      },
+    },
+  },
+  {
+    id: 'candles-without-confusion',
+    order: 2,
+    estimatedMinutes: 4,
+    ctaTarget: 'chart',
+    ctaLabel: { en: 'Open Chart', zh: '打开图表' },
+    quiz: [
+      {
+        id: 'candle-1',
+        correctAnswer: 'a',
+        answers: {
+          en: [
+            { key: 'a', text: 'A long wick can show rejection, not just noise.' },
+            { key: 'b', text: 'Only the candle colour matters.' },
+            { key: 'c', text: 'Every bullish candle means buy now.' },
+          ],
+          zh: [
+            { key: 'a', text: '长影线可能代表价格被明显拒绝。' },
+            { key: 'b', text: '只看K线颜色就够了。' },
+            { key: 'c', text: '只要阳线出现，就一定要立刻买。' },
+          ],
+        },
+        explanation: {
+          en: 'Wicks show where price tried to go and failed. That information matters for entries and traps.',
+          zh: '影线代表价格曾经尝试走过去，但被打回来。这对进场和陷阱判断很重要。',
+        },
+      },
+      {
+        id: 'candle-2',
+        correctAnswer: 'b',
+        answers: {
+          en: [
+            { key: 'a', text: 'A candle close is less important than intrabar excitement.' },
+            { key: 'b', text: 'A strong close usually tells you more than a noisy mid-candle move.' },
+            { key: 'c', text: 'You should judge direction before the candle is near closing.' },
+          ],
+          zh: [
+            { key: 'a', text: 'K线收盘不重要，盘中怎么跳最重要。' },
+            { key: 'b', text: '强势收盘通常比中途乱跳更有参考价值。' },
+            { key: 'c', text: 'K线还没快收盘前，就应该先下结论。' },
+          ],
+        },
+        explanation: {
+          en: 'A close contains commitment. Mid-candle movement often creates false confidence.',
+          zh: '收盘更能代表市场是否真的站稳。盘中波动很容易给你假信心。',
+        },
+      },
+    ],
+    copy: {
+      en: {
+        title: 'Candles Without Confusion',
+        objective: 'Read open, high, low, close and wick rejection without overcomplicating it.',
+        coreIdea: 'A candle tells you where price opened, stretched, failed, and finally closed. The wick and the close matter together.',
+        whyItMatters: 'If you read one candle properly, you stop chasing colour and start understanding pressure and rejection.',
+        example: 'When gold prints a long upper wick near resistance, buyers may have tried to push higher but failed to hold the level.',
+        beginnerMistake: 'Assuming every green candle is bullish confirmation even when the close is weak or trapped under resistance.',
+        riskNote: 'One candle alone is not enough. Always check where it formed.',
+        exercise: 'Open Chart and compare one candle with a strong close versus one with a long wick and weak finish.',
+        ctaCopy: 'Use the live chart and decide which candle shows real control and which one only looks dramatic.',
+        focusTitle: 'Wick + close',
+        focusBody: 'A candle tells a story. Read the rejection and the close together.',
+      },
+      zh: {
+        title: '看懂 K 线，不要越看越乱',
+        objective: '学会用开高低收和影线来理解K线，而不是只看颜色。',
+        coreIdea: '一根K线会告诉你价格从哪里开、拉到哪里、被打回多少，最后收在哪里。影线和收盘都要一起看。',
+        whyItMatters: '当你真正会读K线，就不会只追颜色，而会开始看多空力量和价格拒绝。',
+        example: '如果金价在阻力位附近留下很长的上影线，说明买方有推高过，但最后没守住。',
+        beginnerMistake: '看到阳线就当成确认上涨，却忽略它其实收得很弱，或者刚好压在阻力下方。',
+        riskNote: '单看一根K线不够，先看它出现在什么位置。',
+        exercise: '打开图表，比较一根强势收盘K线和一根长影线但收得不好的K线。',
+        ctaCopy: '回到实时图表，判断哪一根K线是真的强，哪一根只是看起来很刺激。',
+        focusTitle: '影线 + 收盘',
+        focusBody: '别只看颜色，先看价格有没有被明显打回来。',
+      },
+    },
+  },
+  {
+    id: 'trend-vs-range',
+    order: 3,
+    estimatedMinutes: 5,
+    ctaTarget: 'chart',
+    ctaLabel: { en: 'Open Chart', zh: '打开图表' },
+    quiz: [
+      {
+        id: 'trend-1',
+        correctAnswer: 'c',
+        answers: {
+          en: [
+            { key: 'a', text: 'Every small pullback means the trend is over.' },
+            { key: 'b', text: 'A range and a trend should be traded the same way.' },
+            { key: 'c', text: 'Higher highs and higher lows usually suggest an uptrend.' },
+          ],
+          zh: [
+            { key: 'a', text: '只要有小回调，趋势就结束了。' },
+            { key: 'b', text: '震荡和趋势可以用同样方式做。' },
+            { key: 'c', text: '高点越来越高、低点也越来越高，通常代表上升趋势。' },
+          ],
+        },
+        explanation: {
+          en: 'Structure matters more than emotion. A real trend usually keeps defending its pullbacks.',
+          zh: '结构比情绪更重要。真正的趋势，回调后通常还能继续守住结构。',
+        },
+      },
+      {
+        id: 'trend-2',
+        correctAnswer: 'a',
+        answers: {
+          en: [
+            { key: 'a', text: 'If you are unsure whether price is trending or ranging, reduce confidence and wait.' },
+            { key: 'b', text: 'When in doubt, force a breakout trade.' },
+            { key: 'c', text: 'Direction does not matter if the signal badge looks strong.' },
+          ],
+          zh: [
+            { key: 'a', text: '如果你分不清趋势还是震荡，就先降低信心，等更清楚。' },
+            { key: 'b', text: '看不清时，反而更应该硬做突破。' },
+            { key: 'c', text: '只要信号 badge 看起来强，方向不重要。' },
+          ],
+        },
+        explanation: {
+          en: 'Unclear structure is already useful information. Waiting is part of the edge.',
+          zh: '看不清结构，本身就是信息。会等，才是优势的一部分。',
+        },
+      },
+    ],
+    copy: {
+      en: {
+        title: 'Trend vs Range',
+        objective: 'Tell the difference between a directional move and a sideways market before planning entries.',
+        coreIdea: 'A trend keeps building structure. A range keeps sending price back into the same zone.',
+        whyItMatters: 'Most beginner mistakes come from using trend logic inside a range, or range logic inside a trend.',
+        example: 'If gold keeps printing higher lows and reclaiming pullbacks, buying the dip makes more sense than fading every push.',
+        beginnerMistake: 'Calling every pullback a reversal and jumping against the move too early.',
+        riskNote: 'If structure is unclear, your trade idea is weaker even if one candle looks good.',
+        exercise: 'Open Chart and decide whether the current move is trending, ranging, or not clear enough yet.',
+        ctaCopy: 'Use the chart first. Decide the market condition before you look at the signal card.',
+        focusTitle: 'Read structure first',
+        focusBody: 'The setup quality changes when you know whether price is trending or ranging.',
+      },
+      zh: {
+        title: '趋势还是震荡',
+        objective: '在计划进场前，先分清市场是在走趋势还是在区间震荡。',
+        coreIdea: '趋势会不断建立结构，震荡则会把价格反复拉回同一区域。',
+        whyItMatters: '很多新手亏损，都是因为在震荡里用趋势做法，或在趋势里用震荡做法。',
+        example: '如果金价一直抬高低点，回调后又能收回去，那顺势找买点通常比一路猜顶更合理。',
+        beginnerMistake: '每次小回调都当成要反转，太早逆势进场。',
+        riskNote: '如果结构还不清楚，就算有一根好看的K线，交易逻辑也还是偏弱。',
+        exercise: '打开图表，判断当前价格是趋势、震荡，还是还不够清楚。',
+        ctaCopy: '先看图表结构，再决定要不要相信眼前这个 signal。',
+        focusTitle: '先认结构',
+        focusBody: '你知道市场状态后，setup 的质量才会更清楚。',
+      },
+    },
+  },
+  {
+    id: 'support-and-resistance',
+    order: 4,
+    estimatedMinutes: 4,
+    ctaTarget: 'chart',
+    ctaLabel: { en: 'Open Chart', zh: '打开图表' },
+    quiz: [
+      {
+        id: 'sr-1',
+        correctAnswer: 'b',
+        answers: {
+          en: [
+            { key: 'a', text: 'Draw as many lines as possible to be safe.' },
+            { key: 'b', text: 'Mark the nearest meaningful zones, not every tiny reaction.' },
+            { key: 'c', text: 'Support and resistance do not matter on gold.' },
+          ],
+          zh: [
+            { key: 'a', text: '线越多越安全。' },
+            { key: 'b', text: '先标最近、最关键的区域，不要把每个小反应都画出来。' },
+            { key: 'c', text: '黄金根本不看支撑阻力。' },
+          ],
+        },
+        explanation: {
+          en: 'Good levels simplify the chart. Bad levels make every part of the chart look important.',
+          zh: '好的水平位会让图更清楚，不好的画法会让整张图看起来哪里都重要。',
+        },
+      },
+      {
+        id: 'sr-2',
+        correctAnswer: 'a',
+        answers: {
+          en: [
+            { key: 'a', text: 'A clean level can still fail when news or momentum is strong.' },
+            { key: 'b', text: 'A level always holds once it is drawn.' },
+            { key: 'c', text: 'Levels matter only after you enter.' },
+          ],
+          zh: [
+            { key: 'a', text: '再干净的水平位，碰到强新闻或强动能也可能失效。' },
+            { key: 'b', text: '只要画出来，水平位一定会守住。' },
+            { key: 'c', text: '水平位只有进场后才重要。' },
+          ],
+        },
+        explanation: {
+          en: 'Levels are areas of interest, not guarantees. Context still decides the reaction quality.',
+          zh: '水平位是重点区域，不是保证。最后还是要看当下背景和动能。',
+        },
+      },
+    ],
+    copy: {
+      en: {
+        title: 'Support and Resistance',
+        objective: 'Mark the nearest useful zones so you do not enter straight into trouble.',
+        coreIdea: 'Support and resistance are areas where price previously reacted with enough force to matter again.',
+        whyItMatters: 'A good level helps you plan entry, stop, and target with more structure and less guesswork.',
+        example: 'If gold rejects the same zone near a prior high several times, that area can act like resistance until buyers prove otherwise.',
+        beginnerMistake: 'Drawing too many lines until every price level starts looking important.',
+        riskNote: 'Levels are zones, not exact magic numbers.',
+        exercise: 'Open Chart and mark the closest support and resistance that would affect the next setup.',
+        ctaCopy: 'Use the chart and check whether price is near a wall, not just whether the signal looks attractive.',
+        focusTitle: 'Mark the key zone',
+        focusBody: 'Keep only the levels that can still affect the next decision.',
+      },
+      zh: {
+        title: '支撑与阻力',
+        objective: '学会先标出最近、最有用的区域，避免直接撞进风险位。',
+        coreIdea: '支撑和阻力，是价格曾经明显反应过、未来仍可能再起作用的区域。',
+        whyItMatters: '关键位置看清后，进场、止损、止盈都会更有结构，不再只是猜。',
+        example: '如果金价在前高附近多次被打下来，这个区域在买方重新站稳前，都可能继续充当阻力。',
+        beginnerMistake: '画太多线，结果每个价位看起来都很重要。',
+        riskNote: '水平位是区域，不是神奇到分毫不差的数字。',
+        exercise: '打开图表，标出最靠近当前价格、最可能影响下一笔 setup 的支撑和阻力。',
+        ctaCopy: '回到图表，先确认前面有没有墙，再看这个 signal 是否还值得做。',
+        focusTitle: '先画关键区',
+        focusBody: '别把图表画满，保留会影响下一步决定的水平位就好。',
+      },
+    },
+  },
+  {
+    id: 'timeframes-that-work-together',
+    order: 5,
+    estimatedMinutes: 4,
+    ctaTarget: 'chart',
+    ctaLabel: { en: 'Open Chart', zh: '打开图表' },
+    quiz: [
+      {
+        id: 'tf-1',
+        correctAnswer: 'c',
+        answers: {
+          en: [
+            { key: 'a', text: 'Use only one timeframe forever.' },
+            { key: 'b', text: 'Lower timeframe noise is always more reliable.' },
+            { key: 'c', text: 'Higher timeframe bias plus lower timeframe execution is usually clearer.' },
+          ],
+          zh: [
+            { key: 'a', text: '只看一个 timeframe 就够一辈子。' },
+            { key: 'b', text: '越小 timeframe 越可靠。' },
+            { key: 'c', text: '高 timeframe 定方向，低 timeframe 找执行，通常更清楚。' },
+          ],
+        },
+        explanation: {
+          en: 'Bias and execution are different jobs. Separate them and the chart becomes easier to read.',
+          zh: '方向判断和执行进场是两回事。把它们分开，图表会更容易看懂。',
+        },
+      },
+      {
+        id: 'tf-2',
+        correctAnswer: 'a',
+        answers: {
+          en: [
+            { key: 'a', text: 'If H1 and M5 completely disagree, you should slow down and reassess.' },
+            { key: 'b', text: 'Conflicting timeframes mean stronger conviction.' },
+            { key: 'c', text: 'Timeframe conflict does not matter if a signal is active.' },
+          ],
+          zh: [
+            { key: 'a', text: '如果 H1 和 M5 完全相反，就应该先放慢，再重新判断。' },
+            { key: 'b', text: 'timeframe 冲突代表更强信心。' },
+            { key: 'c', text: '只要 signal 亮了，timeframe 冲突也不用管。' },
+          ],
+        },
+        explanation: {
+          en: 'Timeframe conflict often means you are mixing different stories into one trade idea.',
+          zh: 'timeframe 打架，通常代表你把不同层级的故事硬塞成一笔交易。',
+        },
+      },
+    ],
+    copy: {
+      en: {
+        title: 'Timeframes That Work Together',
+        objective: 'Use higher timeframe bias and lower timeframe execution without mixing them up.',
+        coreIdea: 'The higher timeframe tells you the broad map. The lower timeframe tells you where the entry becomes cleaner or messier.',
+        whyItMatters: 'Many bad trades come from treating short-term noise as if it outranks the larger structure.',
+        example: 'If H1 is still bullish but M5 pulls back into support, you may get a cleaner long than if you fade the whole move.',
+        beginnerMistake: 'Switching timeframes every few seconds until one of them agrees with the trade you already want.',
+        riskNote: 'More timeframes do not always mean more clarity. Use only what helps the decision.',
+        exercise: 'Open Chart and compare H1 bias with M15 or M5 structure before choosing a direction.',
+        ctaCopy: 'Use the timeframe buttons and decide whether the short-term move still fits the bigger map.',
+        focusTitle: 'Bias first, entry second',
+        focusBody: 'Use the bigger map for direction and the smaller map for timing.',
+      },
+      zh: {
+        title: '让 timeframe 彼此配合',
+        objective: '学会用高 timeframe 定方向，再用低 timeframe 找更干净的执行点。',
+        coreIdea: '高 timeframe 给你大地图，低 timeframe 告诉你进场是变清楚了，还是变乱了。',
+        whyItMatters: '很多烂交易，都是把短线噪音当成比大结构更重要。',
+        example: '如果 H1 还是偏多，而 M5 回踩到支撑附近，你顺势找多通常会比一路猜顶更合理。',
+        beginnerMistake: '不停切 timeframe，只为了找到一个同意你原本想法的画面。',
+        riskNote: '看的 timeframe 越多，不一定越清楚。只留真正有帮助的。',
+        exercise: '打开图表，对比 H1 的方向和 M15 / M5 的结构，再决定偏向哪一边。',
+        ctaCopy: '用 timeframe 按钮先看大方向，再看短线动作有没有配合。',
+        focusTitle: '先定方向，再找节奏',
+        focusBody: '高 timeframe 定大局，低 timeframe 才负责执行。',
+      },
+    },
+  },
+  {
+    id: 'indicators-as-helpers',
+    order: 6,
+    estimatedMinutes: 4,
+    ctaTarget: 'signal',
+    ctaLabel: { en: 'Open Signal', zh: '打开信号' },
+    quiz: [
+      {
+        id: 'ind-1',
+        correctAnswer: 'b',
+        answers: {
+          en: [
+            { key: 'a', text: 'One indicator cross is enough to ignore everything else.' },
+            { key: 'b', text: 'Indicators should support price context, not replace it.' },
+            { key: 'c', text: 'More indicators always means a better setup.' },
+          ],
+          zh: [
+            { key: 'a', text: '只要一个指标交叉出现，就可以忽略其他东西。' },
+            { key: 'b', text: '指标应该辅助价格背景，而不是取代它。' },
+            { key: 'c', text: '指标越多，setup 一定越好。' },
+          ],
+        },
+        explanation: {
+          en: 'Indicators help you organise information. They do not remove the need to read structure and risk.',
+          zh: '指标是帮你整理信息，不是帮你省掉结构判断和风险判断。',
+        },
+      },
+      {
+        id: 'ind-2',
+        correctAnswer: 'a',
+        answers: {
+          en: [
+            { key: 'a', text: 'ATR can help you judge whether a stop is unrealistically tight for gold.' },
+            { key: 'b', text: 'ATR tells you the exact future direction.' },
+            { key: 'c', text: 'ADX means buy whenever it rises.' },
+          ],
+          zh: [
+            { key: 'a', text: 'ATR 可以帮你判断止损对黄金来说会不会太近。' },
+            { key: 'b', text: 'ATR 可以直接告诉你未来方向。' },
+            { key: 'c', text: 'ADX 只要往上就代表一定要买。' },
+          ],
+        },
+        explanation: {
+          en: 'ATR measures movement size, which helps with stop logic and volatility expectations.',
+          zh: 'ATR 反映波动大小，所以更适合辅助止损和波动判断。',
+        },
+      },
+    ],
+    copy: {
+      en: {
+        title: 'Indicators as Helpers',
+        objective: 'Use indicators as supporting tools instead of turning them into a shortcut for thinking.',
+        coreIdea: 'EMA, RSI, ATR, and ADX can help you confirm structure, momentum, and volatility, but they cannot replace context.',
+        whyItMatters: 'If you let indicators do all the thinking, you become late, reactive, and easily trapped.',
+        example: 'A bullish EMA structure matters more when price is also holding above support, not when it is buying straight into resistance.',
+        beginnerMistake: 'Stacking more indicators whenever confidence is low, which usually creates more noise, not more clarity.',
+        riskNote: 'A neat indicator reading can still fail if the price location is bad.',
+        exercise: 'Open Signal and ask whether the indicator conditions support the chart story or only look nice on their own.',
+        ctaCopy: 'Use the Signal card to see which conditions are green, then check whether they match the chart context.',
+        focusTitle: 'Indicators support, not lead',
+        focusBody: 'Use indicators to confirm the story, not to invent one.',
+      },
+      zh: {
+        title: '把指标当助手，不当老板',
+        objective: '学会把指标当辅助工具，而不是当成替你思考的捷径。',
+        coreIdea: 'EMA、RSI、ATR、ADX 可以帮助你看结构、动能和波动，但它们不能取代背景判断。',
+        whyItMatters: '如果你把所有思考都交给指标，通常会变得更慢、更被动，也更容易被套。',
+        example: 'EMA 多头排列当然有参考价值，但如果价格已经直接撞上阻力位，这个参考就会变弱。',
+        beginnerMistake: '一没信心就加更多指标，结果不是更清楚，而是更吵。',
+        riskNote: '指标读数再漂亮，如果价格位置不好，一样会失败。',
+        exercise: '打开 Signal，先看条件是不是都变绿了，再问自己：它们有没有真的配合图表背景？',
+        ctaCopy: '先看 Signal 条件，再回到图表确认这些条件是不是有背景支持。',
+        focusTitle: '指标只能辅助',
+        focusBody: '别让指标替你编故事，先让价格结构说话。',
+      },
+    },
+  },
+  {
+    id: 'entry-tp-and-sl',
+    order: 7,
+    estimatedMinutes: 5,
+    ctaTarget: 'signal',
+    ctaLabel: { en: 'Open Signal', zh: '打开信号' },
+    quiz: [
+      {
+        id: 'risk-1',
+        correctAnswer: 'c',
+        answers: {
+          en: [
+            { key: 'a', text: 'Place stop loss anywhere as long as the lot size is small.' },
+            { key: 'b', text: 'Take profit is enough; invalidation is optional.' },
+            { key: 'c', text: 'A good trade plan knows where the idea is wrong, not only where profit is hoped for.' },
+          ],
+          zh: [
+            { key: 'a', text: '止损随便放，只要手数够小就行。' },
+            { key: 'b', text: '只要有止盈，交易逻辑错不重要。' },
+            { key: 'c', text: '好的交易计划会先知道哪里错，不只是希望赚到哪里。' },
+          ],
+        },
+        explanation: {
+          en: 'Risk starts with invalidation. If you do not know where the idea breaks, the rest of the plan is weak.',
+          zh: '风险管理先从失效点开始。如果你不知道哪里算错，后面的计划就很弱。',
+        },
+      },
+      {
+        id: 'risk-2',
+        correctAnswer: 'b',
+        answers: {
+          en: [
+            { key: 'a', text: 'If stop distance is tiny, the trade is always better.' },
+            { key: 'b', text: 'Gold often needs breathing room, so unrealistically tight stops can be poor risk control.' },
+            { key: 'c', text: 'TP1, TP2, and TP3 are only decoration.' },
+          ],
+          zh: [
+            { key: 'a', text: '止损越小，交易一定越好。' },
+            { key: 'b', text: '黄金常需要一点呼吸空间，止损太贴反而不是好风控。' },
+            { key: 'c', text: 'TP1、TP2、TP3 只是摆设。' },
+          ],
+        },
+        explanation: {
+          en: 'Tight risk is not the same as smart risk. The stop still has to fit the market.',
+          zh: '止损小不等于风控好，关键是这个止损要符合市场波动。',
+        },
+      },
+    ],
+    copy: {
+      en: {
+        title: 'Entry, TP, and SL',
+        objective: 'Understand how entry, take profit, and stop loss work together as one trade plan.',
+        coreIdea: 'Entry gets you in. Stop loss protects your idea when it is wrong. Targets define how the trade pays when it works.',
+        whyItMatters: 'Without clear invalidation, even a nice-looking signal becomes guesswork.',
+        example: 'If gold is buying from support, the stop should usually sit beyond the structure that would prove the bounce failed.',
+        beginnerMistake: 'Using a very tight stop only because the loss looks smaller on paper.',
+        riskNote: 'A smaller stop is only good if it still respects market structure and volatility.',
+        exercise: 'Open Signal and ask whether the current stop placement makes structural sense, not just mathematical sense.',
+        ctaCopy: 'Use the live signal card to study where the setup becomes invalid and whether the targets are realistic.',
+        focusTitle: 'Know where you are wrong',
+        focusBody: 'Good risk control begins with invalidation, not with hope.',
+      },
+      zh: {
+        title: '进场、止盈、止损怎么配合',
+        objective: '理解进场、止盈和止损，如何一起组成完整的交易计划。',
+        coreIdea: 'Entry 负责让你进场，Stop Loss 负责在想法错时保护你，Targets 负责定义做对时怎么拿利润。',
+        whyItMatters: '如果没有明确失效点，再漂亮的 signal 也只是猜。',
+        example: '如果金价是在支撑位反弹做多，止损通常应该放在那个结构真正失守之后，而不是随便贴近一点。',
+        beginnerMistake: '只因为纸面亏损看起来小，就把止损放得太紧。',
+        riskNote: '止损更小不一定更好，前提是它仍然尊重结构和波动。',
+        exercise: '打开 Signal，先问自己当前止损位置是不是符合结构，而不只是看起来数字更漂亮。',
+        ctaCopy: '用实时 signal 卡片练习看失效点，而不只是看目标位。',
+        focusTitle: '先知道哪里错',
+        focusBody: '风控不是先想赚多少，而是先知道哪里证明你错了。',
+      },
+    },
+  },
+  {
+    id: 'news-risk-and-no-trade-zones',
+    order: 8,
+    estimatedMinutes: 4,
+    ctaTarget: 'calendar',
+    ctaLabel: { en: 'Open Calendar', zh: '打开日历' },
+    quiz: [
+      {
+        id: 'news-1',
+        correctAnswer: 'a',
+        answers: {
+          en: [
+            { key: 'a', text: 'A no-trade decision can be the correct decision near major news.' },
+            { key: 'b', text: 'You should always trade because volatility means opportunity.' },
+            { key: 'c', text: 'Major news matters only for stocks, not gold.' },
+          ],
+          zh: [
+            { key: 'a', text: '重大新闻附近，选择不交易也可能是正确决定。' },
+            { key: 'b', text: '波动大就一定要做，不然浪费机会。' },
+            { key: 'c', text: '重磅新闻只影响股票，不影响黄金。' },
+          ],
+        },
+        explanation: {
+          en: 'Discipline is not only about entering. Sometimes the edge is in avoiding unstable conditions.',
+          zh: '纪律不只是敢不敢进场，有时真正的优势是避开不稳定时段。',
+        },
+      },
+      {
+        id: 'news-2',
+        correctAnswer: 'c',
+        answers: {
+          en: [
+            { key: 'a', text: 'Ignore event timing if your indicator alignment looks strong.' },
+            { key: 'b', text: 'News matters only after you are already in the trade.' },
+            { key: 'c', text: 'Calendar timing changes how much you should trust a setup.' },
+          ],
+          zh: [
+            { key: 'a', text: '只要指标齐了，就不用管事件时间。' },
+            { key: 'b', text: '新闻只有进场后才重要。' },
+            { key: 'c', text: '事件时间会直接改变你该不该相信一个 setup。' },
+          ],
+        },
+        explanation: {
+          en: 'A setup does not exist in isolation. Timing changes execution quality.',
+          zh: '一个 setup 不是独立存在的，时间点会直接改变执行质量。',
+        },
+      },
+    ],
+    copy: {
+      en: {
+        title: 'News Risk and No-Trade Zones',
+        objective: 'Recognise when calendar risk changes the quality of an otherwise decent setup.',
+        coreIdea: 'High-impact events can distort spreads, speed, and direction fast enough to break normal technical logic.',
+        whyItMatters: 'A setup can be technically fine but operationally poor because the timing is wrong.',
+        example: 'A clean breakout five minutes before FOMC is very different from the same breakout on a quiet session.',
+        beginnerMistake: 'Forcing a trade because the chart looks clean while ignoring the calendar.',
+        riskNote: 'Near major events, staying flat is often smarter than proving you are brave.',
+        exercise: 'Open Calendar and decide whether the next event creates a trade zone or a wait zone.',
+        ctaCopy: 'Use the event list and ask whether the next setup should be traded, reduced, or skipped.',
+        focusTitle: 'No-trade is still a decision',
+        focusBody: 'Protecting capital near major news is part of the edge.',
+      },
+      zh: {
+        title: '新闻风险与不交易区',
+        objective: '学会判断什么时候日历风险会让原本还不错的 setup 变差。',
+        coreIdea: '高影响事件会突然改变点差、速度和方向，快到足以打坏原本正常的技术逻辑。',
+        whyItMatters: '一个 setup 可能技术上没问题，但时间点不对，执行质量就会很差。',
+        example: 'FOMC 前 5 分钟的漂亮突破，和安静时段的同样突破，质量完全不是一回事。',
+        beginnerMistake: '图表看起来干净，就硬做，不去看经济日历。',
+        riskNote: '重大事件附近，空手等待往往比硬证明自己敢做更聪明。',
+        exercise: '打开日历，判断下一个事件会形成可交易区，还是该等待的区域。',
+        ctaCopy: '看完事件列表后，再决定这个 setup 是该做、缩小，还是直接跳过。',
+        focusTitle: '不做也是决定',
+        focusBody: '重大新闻前先保护资金，本身就是优势的一部分。',
+      },
+    },
+  },
+  {
+    id: 'review-stats-and-improvement',
+    order: 9,
+    estimatedMinutes: 4,
+    ctaTarget: 'stats',
+    ctaLabel: { en: 'Open Stats', zh: '打开统计' },
+    quiz: [
+      {
+        id: 'review-1',
+        correctAnswer: 'b',
+        answers: {
+          en: [
+            { key: 'a', text: 'Win rate alone tells the whole story.' },
+            { key: 'b', text: 'Review should include how and why trades won or lost, not just the final count.' },
+            { key: 'c', text: 'Once a trade closes, there is nothing useful to learn from it.' },
+          ],
+          zh: [
+            { key: 'a', text: '只看胜率就能知道全部。' },
+            { key: 'b', text: '复盘要看为什么赢、为什么输，不只是看数量。' },
+            { key: 'c', text: '交易结束后，就没有什么值得学的了。' },
+          ],
+        },
+        explanation: {
+          en: 'Numbers matter, but behaviour matters too. Review should improve future decisions.',
+          zh: '数字重要，但行为也重要。复盘的目的，是让下一次决定更好。',
+        },
+      },
+      {
+        id: 'review-2',
+        correctAnswer: 'a',
+        answers: {
+          en: [
+            { key: 'a', text: 'History and stats help you spot repeated mistakes before they become habits.' },
+            { key: 'b', text: 'Review is only useful for advanced traders.' },
+            { key: 'c', text: 'Losing trades should be ignored to protect confidence.' },
+          ],
+          zh: [
+            { key: 'a', text: '历史和统计能帮你更早发现重复错误，别让它变成习惯。' },
+            { key: 'b', text: '只有高手才需要复盘。' },
+            { key: 'c', text: '亏损单最好不要看，免得影响信心。' },
+          ],
+        },
+        explanation: {
+          en: 'Review is what turns random experience into usable improvement.',
+          zh: '复盘就是把零散经验，变成真正能用的进步。',
+        },
+      },
+    ],
+    copy: {
+      en: {
+        title: 'Review, Stats, and Improvement',
+        objective: 'Use history and stats to learn from outcomes instead of reacting emotionally to them.',
+        coreIdea: 'A good review asks what the setup looked like, what the context was, and whether the decision was still sound.',
+        whyItMatters: 'Without review, the same mistake can repeat for months while the trader keeps blaming the market.',
+        example: 'A losing trade taken directly into high-impact news tells a different story from a losing trade taken from a clean level in a calm session.',
+        beginnerMistake: 'Looking only at win rate and ignoring whether the entries themselves were disciplined.',
+        riskNote: 'A win can still be a bad trade, and a loss can still come from a correct process.',
+        exercise: 'Open History or Stats and identify one pattern you should repeat and one mistake you should stop.',
+        ctaCopy: 'Use History and Stats together to judge process quality, not only emotional outcome.',
+        focusTitle: 'Review the process',
+        focusBody: 'The goal is not to feel good. The goal is to get sharper.',
+      },
+      zh: {
+        title: '复盘、统计与进步',
+        objective: '学会用历史和统计来复盘，而不是只对结果产生情绪反应。',
+        coreIdea: '好的复盘会看 setup 当时长什么样、背景如何，以及那个决定本身是否合理。',
+        whyItMatters: '不复盘，同样的错误可以重复好几个月，最后只会怪市场。',
+        example: '一笔亏损，如果是直接冲进高影响新闻，和另一笔在平静时段、关键位附近的亏损，故事完全不同。',
+        beginnerMistake: '只盯胜率，不去看进场过程到底有没有纪律。',
+        riskNote: '赢单也可能是坏交易，亏单也可能来自正确流程。',
+        exercise: '打开 History 或 Stats，找出一个你应该重复的好习惯，以及一个必须停止的错误。',
+        ctaCopy: '把 History 和 Stats 一起看，判断的是流程质量，不只是输赢情绪。',
+        focusTitle: '复盘的是流程',
+        focusBody: '目标不是让自己好受，而是让下一次更清楚。',
+      },
+    },
+  },
+];
 
 let googleTranslateLoader = null;
 const animatedValueState = new Map();
@@ -382,18 +1157,36 @@ function setActivePage(target, opts = {}) {
   if (page) page.classList.add('active');
 
   document.querySelectorAll('.nav-item').forEach((node) => {
-    const isActive = node.dataset.page === target;
+    const nodePage = String(node.dataset.page || '');
+    const isMoreProxy = nodePage === 'more' && MORE_PAGE_TARGETS.has(target);
+    const isActive = nodePage === target || isMoreProxy;
     node.classList.toggle('active', isActive);
   });
 
   if (target === 'chart' && window.Chart && !window.Chart.isInitialized()) {
     window.Chart.init();
   }
+  if (target === 'learn') {
+    if (page && typeof page.scrollTo === 'function') {
+      page.scrollTo({ top: 0, behavior: 'auto' });
+    }
+    if (window.UI && typeof window.UI.renderLearnPage === 'function') {
+      window.UI.renderLearnPage();
+    } else {
+      renderLearnPage();
+    }
+  }
+  window.dispatchEvent(new CustomEvent('xauradar:page-change', { detail: { page: target } }));
 }
 
 function initNavigation() {
   document.querySelectorAll('.nav-item').forEach((item) => {
     item.addEventListener('click', () => setActivePage(item.dataset.page));
+  });
+  document.querySelectorAll('.learn-nav-link').forEach((item) => {
+    if (item.dataset.bound === '1') return;
+    item.dataset.bound = '1';
+    item.addEventListener('click', () => setActivePage(item.dataset.targetPage || 'signal'));
   });
 }
 
@@ -1021,6 +1814,7 @@ async function applyTranslateLanguage(lang, { persist = true } = {}) {
     localStorage.setItem(LANG_KEY, normalized);
   }
   applyTranslateToggleLabel(btn, normalized);
+  window.dispatchEvent(new CustomEvent('xauradar:language-change', { detail: { lang: normalized } }));
 
   const ready = await ensureGoogleTranslateWidget();
   if (!ready) {
@@ -1060,6 +1854,311 @@ function initTranslateToggle() {
       btn.disabled = false;
     }
   });
+}
+
+function getLearnLanguage() {
+  return getPreferredLanguage() === 'zh-CN' ? 'zh' : 'en';
+}
+
+function getLearnProgress() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(LEARN_PROGRESS_KEY) || '{}');
+    const completedLessonIds = Array.isArray(parsed?.completedLessonIds)
+      ? parsed.completedLessonIds.filter((value) => typeof value === 'string')
+      : [];
+    const lastLessonId = typeof parsed?.lastLessonId === 'string' ? parsed.lastLessonId : LEARN_LESSONS[0].id;
+    return {
+      completedLessonIds,
+      lastLessonId: LEARN_LESSONS.some((lesson) => lesson.id === lastLessonId) ? lastLessonId : LEARN_LESSONS[0].id,
+    };
+  } catch {
+    return {
+      completedLessonIds: [],
+      lastLessonId: LEARN_LESSONS[0].id,
+    };
+  }
+}
+
+function saveLearnProgress(progress) {
+  localStorage.setItem(LEARN_PROGRESS_KEY, JSON.stringify({
+    completedLessonIds: Array.isArray(progress?.completedLessonIds) ? progress.completedLessonIds : [],
+    lastLessonId: typeof progress?.lastLessonId === 'string' ? progress.lastLessonId : LEARN_LESSONS[0].id,
+  }));
+}
+
+function getLearnQuizState() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(LEARN_QUIZ_KEY) || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveLearnQuizState(state) {
+  localStorage.setItem(LEARN_QUIZ_KEY, JSON.stringify(state && typeof state === 'object' ? state : {}));
+}
+
+function getLearnLesson(id) {
+  return LEARN_LESSONS.find((lesson) => lesson.id === id) || LEARN_LESSONS[0];
+}
+
+function getLearnCopy(lesson, lang = getLearnLanguage()) {
+  return lesson?.copy?.[lang] || lesson?.copy?.en || {};
+}
+
+function isLessonCompleted(id) {
+  return getLearnProgress().completedLessonIds.includes(id);
+}
+
+function getNextLearnLesson(currentId) {
+  const progress = getLearnProgress();
+  const incomplete = LEARN_LESSONS.find((lesson) => !progress.completedLessonIds.includes(lesson.id));
+  if (incomplete) return incomplete;
+  const currentIndex = LEARN_LESSONS.findIndex((lesson) => lesson.id === currentId);
+  return LEARN_LESSONS[(currentIndex + 1) % LEARN_LESSONS.length] || LEARN_LESSONS[0];
+}
+
+function setCurrentLearnLesson(id, { persist = true } = {}) {
+  const lesson = getLearnLesson(id);
+  currentLearnLessonId = lesson.id;
+  if (persist) {
+    const progress = getLearnProgress();
+    progress.lastLessonId = lesson.id;
+    saveLearnProgress(progress);
+  }
+  renderLearnPage();
+}
+
+function toggleLearnLessonComplete(id = currentLearnLessonId) {
+  const progress = getLearnProgress();
+  const exists = progress.completedLessonIds.includes(id);
+  progress.completedLessonIds = exists
+    ? progress.completedLessonIds.filter((value) => value !== id)
+    : progress.completedLessonIds.concat(id);
+  progress.lastLessonId = id;
+  saveLearnProgress(progress);
+  renderLearnPage();
+}
+
+function getLearnCtaLabel(lesson, lang) {
+  const copy = LEARN_UI_COPY[lang];
+  const fallback = lesson?.ctaLabel?.[lang] || lesson?.ctaLabel?.en || '';
+  if (fallback) return fallback;
+  if (lesson.ctaTarget === 'signal') return copy.openSignal;
+  if (lesson.ctaTarget === 'calendar') return copy.openCalendar;
+  if (lesson.ctaTarget === 'history') return copy.openHistory;
+  if (lesson.ctaTarget === 'stats') return copy.openStats;
+  return copy.openChart;
+}
+
+function renderLearnModuleList(lang) {
+  const list = document.getElementById('learn-module-list');
+  if (!list) return;
+  const copy = LEARN_UI_COPY[lang];
+  const progress = getLearnProgress();
+  list.innerHTML = LEARN_LESSONS.map((lesson) => {
+    const lessonCopy = getLearnCopy(lesson, lang);
+    const isActive = lesson.id === currentLearnLessonId;
+    const isDone = progress.completedLessonIds.includes(lesson.id);
+    return `
+      <button type="button" class="learn-module-item${isActive ? ' active' : ''}" data-learn-lesson="${escapeHtml(lesson.id)}">
+        <span class="learn-module-item__index">${lesson.order}</span>
+        <span class="learn-module-item__copy">
+          <span class="learn-module-item__title">${escapeHtml(lessonCopy.title || `Lesson ${lesson.order}`)}</span>
+          <span class="learn-module-item__meta">${escapeHtml(String(lesson.estimatedMinutes))} ${escapeHtml(copy.min)}${isDone ? ` • ${escapeHtml(copy.completed)}` : ''}</span>
+        </span>
+      </button>
+    `;
+  }).join('');
+}
+
+function renderLearnQuiz(lesson, lang) {
+  const list = document.getElementById('learn-quiz-list');
+  const feedback = document.getElementById('learn-quiz-feedback');
+  const badge = document.getElementById('learn-quiz-badge');
+  if (!list || !feedback || !badge) return;
+
+  const copy = LEARN_UI_COPY[lang];
+  const answersState = learnSelectedAnswers[currentLearnLessonId] || {};
+  badge.textContent = `${lesson.quiz.length} ${lang === 'zh' ? '题' : lesson.quiz.length === 1 ? 'question' : 'questions'}`;
+
+  list.innerHTML = lesson.quiz.map((question, index) => {
+    const options = question.answers?.[lang] || question.answers?.en || [];
+    const selectedKey = answersState[question.id] || '';
+    const correctKey = question.correctAnswer;
+    return `
+      <section class="learn-quiz-question">
+        <div class="learn-quiz-question__title">${escapeHtml(`${lang === 'zh' ? `问题 ${index + 1}` : `Question ${index + 1}`}`)}</div>
+        <div class="learn-quiz-options">
+          ${options.map((option) => `
+            <button
+              type="button"
+              class="learn-quiz-option${selectedKey === option.key ? ' active' : ''}${selectedKey && option.key === correctKey ? ' correct' : ''}${selectedKey === option.key && selectedKey !== correctKey ? ' incorrect' : ''}"
+              data-learn-question="${escapeHtml(question.id)}"
+              data-learn-answer="${escapeHtml(option.key)}"
+            >
+              <span class="learn-quiz-option__key">${escapeHtml(option.key.toUpperCase())}</span>
+              <span>${escapeHtml(option.text)}</span>
+            </button>
+          `).join('')}
+        </div>
+      </section>
+    `;
+  }).join('');
+
+  feedback.textContent = learnQuizFeedback[currentLearnLessonId] || copy.chooseToSee;
+}
+
+function renderLearnPage() {
+  const page = document.getElementById('page-learn');
+  if (!page) return;
+
+  const lang = getLearnLanguage();
+  const uiCopy = LEARN_UI_COPY[lang];
+  const progress = getLearnProgress();
+  const lesson = getLearnLesson(currentLearnLessonId || progress.lastLessonId || LEARN_LESSONS[0].id);
+  currentLearnLessonId = lesson.id;
+  const lessonCopy = getLearnCopy(lesson, lang);
+  const completedCount = progress.completedLessonIds.length;
+  const progressPct = Math.max(0, Math.min(100, (completedCount / LEARN_LESSONS.length) * 100));
+  const nextLesson = getNextLearnLesson(lesson.id);
+  const nextLessonCopy = getLearnCopy(nextLesson, lang);
+  const isCompleted = progress.completedLessonIds.includes(lesson.id);
+  const hasTouchedCourse = completedCount > 0 || Boolean(Object.keys(getLearnQuizState()[lesson.id] || {}).length) || progress.lastLessonId !== LEARN_LESSONS[0].id;
+
+  const setText = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  };
+
+  setText('learn-hero-eyebrow', uiCopy.heroEyebrow);
+  setText('learn-hero-title', uiCopy.heroTitle);
+  setText('learn-hero-body', uiCopy.heroBody);
+  setText('learn-focus-title', lessonCopy.focusTitle || lessonCopy.title);
+  setText('learn-focus-body', lessonCopy.focusBody || lessonCopy.coreIdea);
+  setText('learn-progress-title', uiCopy.progressTitle);
+  setText('learn-progress-badge', `${completedCount} / ${LEARN_LESSONS.length}`);
+  setText('learn-progress-current-label', uiCopy.currentLesson);
+  setText('learn-current-lesson-name', lessonCopy.title);
+  setText('learn-progress-next-label', uiCopy.nextAction);
+  setText('learn-next-action-text', completedCount === LEARN_LESSONS.length ? (lang === 'zh' ? '你已经完成基础路径，可以回去复盘实战。' : 'You finished the beginner path. Use the app to review and apply it.') : (nextLessonCopy.title ? `${uiCopy.continueLesson}: ${nextLessonCopy.title}` : uiCopy.nextActionText));
+  setText('learn-continue-title', uiCopy.continueTitle);
+  setText('learn-continue-minutes', `${lesson.estimatedMinutes} ${uiCopy.min}`);
+  setText('learn-continue-lesson-title', lessonCopy.title);
+  setText('learn-continue-copy', lessonCopy.coreIdea);
+  setText('learn-module-title', uiCopy.modules);
+  setText('learn-module-badge', uiCopy.beginnerPath);
+  setText('learn-lesson-index', lang === 'zh' ? `第 ${lesson.order} 课 / 共 ${LEARN_LESSONS.length} 课` : `Lesson ${lesson.order} of ${LEARN_LESSONS.length}`);
+  setText('learn-lesson-title', lessonCopy.title);
+  setText('learn-lesson-time', `${lesson.estimatedMinutes} ${uiCopy.min}`);
+  setText('learn-objective-label', uiCopy.objective);
+  setText('learn-objective-copy', lessonCopy.objective);
+  setText('learn-core-idea-label', uiCopy.coreIdea);
+  setText('learn-core-idea-copy', lessonCopy.coreIdea);
+  setText('learn-why-label', uiCopy.whyItMatters);
+  setText('learn-why-copy', lessonCopy.whyItMatters);
+  setText('learn-example-label', uiCopy.example);
+  setText('learn-example-copy', lessonCopy.example);
+  setText('learn-mistake-label', uiCopy.beginnerMistake);
+  setText('learn-mistake-copy', lessonCopy.beginnerMistake);
+  setText('learn-risk-label', uiCopy.riskNote);
+  setText('learn-risk-copy', lessonCopy.riskNote);
+  setText('learn-exercise-label', uiCopy.exercise);
+  setText('learn-exercise-copy', lessonCopy.exercise);
+  setText('learn-cta-label', uiCopy.apply);
+  setText('learn-cta-copy', lessonCopy.ctaCopy);
+  setText('learn-quiz-title', uiCopy.quickCheck);
+
+  const progressFill = document.getElementById('learn-progress-fill');
+  if (progressFill) progressFill.style.width = `${progressPct}%`;
+
+  const resumeBtn = document.getElementById('learn-resume-btn');
+  if (resumeBtn) resumeBtn.textContent = hasTouchedCourse ? uiCopy.continueLesson : uiCopy.startLesson;
+
+  const languageNote = document.getElementById('learn-language-note');
+  if (languageNote) languageNote.textContent = uiCopy.languageBadge;
+
+  const continueBtn = document.getElementById('learn-continue-btn');
+  if (continueBtn) continueBtn.textContent = uiCopy.openLesson;
+
+  const markBtn = document.getElementById('learn-mark-complete-btn');
+  if (markBtn) markBtn.textContent = isCompleted ? uiCopy.completed : uiCopy.markComplete;
+
+  const ctaBtn = document.getElementById('learn-cta-btn');
+  if (ctaBtn) {
+    ctaBtn.textContent = getLearnCtaLabel(lesson, lang);
+    ctaBtn.dataset.targetPage = lesson.ctaTarget || 'chart';
+  }
+
+  renderLearnModuleList(lang);
+  renderLearnQuiz(lesson, lang);
+}
+
+function initLearnPage() {
+  const page = document.getElementById('page-learn');
+  if (!page) return;
+  const progress = getLearnProgress();
+  currentLearnLessonId = getLearnLesson(progress.lastLessonId).id;
+
+  if (page.dataset.bound === '1') {
+    renderLearnPage();
+    return;
+  }
+  page.dataset.bound = '1';
+
+  page.addEventListener('click', (evt) => {
+    const lessonBtn = evt.target.closest('[data-learn-lesson]');
+    if (lessonBtn) {
+      setCurrentLearnLesson(lessonBtn.dataset.learnLesson || LEARN_LESSONS[0].id);
+      return;
+    }
+
+    const navBtn = evt.target.closest('.learn-nav-link,[data-target-page]');
+    if (navBtn && navBtn.dataset.targetPage) {
+      setActivePage(navBtn.dataset.targetPage);
+      return;
+    }
+
+    const continueBtn = evt.target.closest('#learn-resume-btn,#learn-continue-btn');
+    if (continueBtn) {
+      setCurrentLearnLesson(getLearnProgress().lastLessonId || currentLearnLessonId);
+      return;
+    }
+
+    const markBtn = evt.target.closest('#learn-mark-complete-btn');
+    if (markBtn) {
+      toggleLearnLessonComplete(currentLearnLessonId);
+      return;
+    }
+
+    const answerBtn = evt.target.closest('[data-learn-question][data-learn-answer]');
+    if (answerBtn) {
+      const questionId = String(answerBtn.dataset.learnQuestion || '').trim();
+      const answerKey = String(answerBtn.dataset.learnAnswer || '').trim();
+      const lesson = getLearnLesson(currentLearnLessonId);
+      const lang = getLearnLanguage();
+      const question = lesson.quiz.find((item) => item.id === questionId);
+      if (!question) return;
+
+      learnSelectedAnswers[currentLearnLessonId] = {
+        ...(learnSelectedAnswers[currentLearnLessonId] || {}),
+        [questionId]: answerKey,
+      };
+      const existingQuizState = getLearnQuizState();
+      existingQuizState[currentLearnLessonId] = {
+        ...(existingQuizState[currentLearnLessonId] || {}),
+        [questionId]: answerKey,
+      };
+      saveLearnQuizState(existingQuizState);
+      learnQuizFeedback[currentLearnLessonId] = question.explanation?.[lang] || question.explanation?.en || LEARN_UI_COPY[lang].chooseToSee;
+      renderLearnPage();
+    }
+  });
+
+  window.addEventListener('xauradar:language-change', () => renderLearnPage());
+  learnSelectedAnswers = getLearnQuizState();
+  renderLearnPage();
 }
 
 function initChartTime() {
@@ -1739,11 +2838,25 @@ function renderConditions(decisionRun, snapshot, forcedLane = null) {
 
     const blockedReason = row.blocked_reason || c.blocked_reason || '';
     const sessionText = c.session_context || row.session_context || '--';
+    const scoreTotal = Number(c.score_total ?? row.score_total ?? 0);
+    const baseThreshold = Number(c.base_threshold ?? row.base_threshold ?? c.threshold_raw ?? 0);
+    const sessionThresholdAdjustment = Number(c.session_threshold_adjustment ?? row.session_threshold_adjustment ?? 0);
+    const finalThreshold = Number(c.final_threshold ?? row.final_threshold ?? c.threshold_raw ?? 0);
+    const sessionEntryAllowed = Boolean(c.session_entry_allowed ?? gates.session_allowed ?? false);
     const newsText = newsCtx.high_blackout
       ? 'High-impact blackout active'
       : newsCtx.medium_penalty
         ? 'Medium-impact penalty active'
         : 'No active news penalty';
+    const scoreThresholdText = finalThreshold > 0
+      ? `Score: ${scoreTotal.toFixed(0)} / Required: ${finalThreshold.toFixed(0)}`
+      : '';
+    const sessionPolicyText = sessionText === 'ASIA'
+      ? `Session entry: ${sessionEntryAllowed ? 'allowed' : 'blocked'} | Asia requires higher confidence${sessionThresholdAdjustment > 0 ? ` (+${sessionThresholdAdjustment.toFixed(0)})` : ''}`
+      : `Session entry: ${sessionEntryAllowed ? 'allowed' : 'blocked'}`;
+    const thresholdBreakdownText = sessionText === 'ASIA' && finalThreshold > 0
+      ? `Asia threshold: ${finalThreshold.toFixed(0)} = base ${baseThreshold.toFixed(0)} + ${sessionThresholdAdjustment.toFixed(0)}`
+      : '';
 
     return `
       <div class="conditions-lane-panel">
@@ -1751,6 +2864,8 @@ function renderConditions(decisionRun, snapshot, forcedLane = null) {
         ${renderRow('Setup checks', setupItems, tone)}
         ${renderRow('Hard gates', gateItems, blockedReason ? 'sell' : 'buy')}
         <div class="feature-note">Session: ${sessionText} | News: ${newsText}</div>
+        <div class="feature-note">${sessionPolicyText}${scoreThresholdText ? ` | ${scoreThresholdText}` : ''}</div>
+        ${thresholdBreakdownText ? `<div class="feature-note">${thresholdBreakdownText}</div>` : ''}
         <div class="feature-note">Beginner note: aim for mostly PASS in setup checks, then hard gates must PASS.</div>
         ${lane === 'swing' ? '<div class="feature-note">Asia breakout is intraday-only, so it is hidden on Swing tab.</div>' : ''}
         ${blockedReason ? `<div class="feature-note">Blocked reason: ${blockedReason}</div>` : ''}
@@ -2999,6 +4114,7 @@ window.UI = {
   initTheme,
   initTranslateToggle,
   initNavigation,
+  initLearnPage,
   initDashboardSwitch,
   initPolymarketControls,
   getSelectedPolymarketMarketSlug,
@@ -3026,6 +4142,7 @@ window.UI = {
   renderDemoEquityCurve,
   setPolymarketMarketHistory,
   updateRiskCalc,
+  renderLearnPage,
 };
 
 
