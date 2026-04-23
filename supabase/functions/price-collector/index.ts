@@ -11,6 +11,24 @@ type TickPayload = {
   meta: Record<string, unknown>;
 };
 
+type TwelveDataFailure = {
+  kind: "RATE_LIMITED" | "UPSTREAM_ERROR";
+  endpoint: string;
+  code?: number;
+  message?: string;
+  statusCode?: number;
+};
+
+type TwelveDataResult = {
+  data: Record<string, unknown> | null;
+  error: TwelveDataFailure | null;
+};
+
+type TickFetchResult = {
+  tick: TickPayload | null;
+  failure: TwelveDataFailure | null;
+};
+
 const TWELVE_DATA_API_KEY = Deno.env.get("TWELVE_DATA_API_KEY") ?? "";
 // Edge Function custom secrets cannot start with SUPABASE_.
 // Use PROJECT_URL + SERVICE_ROLE_KEY for dashboard secrets.
@@ -137,7 +155,7 @@ function getMarketClockContext(now = new Date()) {
   };
 }
 
-async function twelveGet(path: string, params: Record<string, string>): Promise<Record<string, unknown> | null> {
+async function twelveGet(path: string, params: Record<string, string>): Promise<TwelveDataResult> {
   const u = new URL(`${TWELVE_BASE_URL}${path}`);
   for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
   u.searchParams.set("apikey", TWELVE_DATA_API_KEY);
@@ -146,22 +164,51 @@ async function twelveGet(path: string, params: Record<string, string>): Promise<
     const resp = await fetch(u, { method: "GET" });
     if (!resp.ok) {
       console.error(`TwelveData ${path} HTTP ${resp.status}`);
-      return null;
+      return {
+        data: null,
+        error: {
+          kind: "UPSTREAM_ERROR",
+          endpoint: path,
+          statusCode: resp.status,
+          message: `HTTP ${resp.status}`,
+        },
+      };
     }
     const data = (await resp.json()) as Record<string, unknown>;
     if (String(data.status ?? "").toLowerCase() === "error") {
-      console.error(`TwelveData ${path} error:`, data.message ?? "unknown");
-      return null;
+      const rawCode = Number(data.code);
+      const code = Number.isFinite(rawCode) ? rawCode : undefined;
+      const message = String(data.message ?? "unknown");
+      const kind = code === 429 ? "RATE_LIMITED" : "UPSTREAM_ERROR";
+      console.error(`TwelveData ${path} error:`, message);
+      return {
+        data: null,
+        error: {
+          kind,
+          endpoint: path,
+          code,
+          message,
+          statusCode: resp.status,
+        },
+      };
     }
-    return data;
+    return { data, error: null };
   } catch (err) {
     console.error(`TwelveData ${path} request failed:`, err);
-    return null;
+    return {
+      data: null,
+      error: {
+        kind: "UPSTREAM_ERROR",
+        endpoint: path,
+        message: err instanceof Error ? err.message : String(err),
+      },
+    };
   }
 }
 
-async function fetchTick(): Promise<TickPayload | null> {
-  const quote = await twelveGet("/quote", { symbol: SYMBOL });
+async function fetchTick(): Promise<TickFetchResult> {
+  const quoteResult = await twelveGet("/quote", { symbol: SYMBOL });
+  const quote = quoteResult.data;
   if (quote) {
     const price = parseFloatSafe(quote.close ?? quote.price ?? quote.last);
     const bid = parseFloatSafe(quote.bid);
@@ -169,46 +216,60 @@ async function fetchTick(): Promise<TickPayload | null> {
     if (price) {
       const providerTs = clampToRecent(parseProviderTs(quote.timestamp ?? quote.datetime));
       return {
-        provider_ts: providerTs,
-        symbol: SYMBOL,
-        price,
-        bid: bid ?? price,
-        ask: ask ?? price,
-        source: "TD_LIVE",
-        is_delayed: false,
-        meta: {
-          endpoint: "quote",
-          quote_datetime: quote.datetime ?? null,
-          quote_timestamp: quote.timestamp ?? null,
+        tick: {
+          provider_ts: providerTs,
+          symbol: SYMBOL,
+          price,
+          bid: bid ?? price,
+          ask: ask ?? price,
+          source: "TD_LIVE",
+          is_delayed: false,
+          meta: {
+            endpoint: "quote",
+            quote_datetime: quote.datetime ?? null,
+            quote_timestamp: quote.timestamp ?? null,
+          },
         },
+        failure: null,
       };
     }
   }
+  if (quoteResult.error?.kind === "RATE_LIMITED") {
+    return { tick: null, failure: quoteResult.error };
+  }
 
-  const priceResp = await twelveGet("/price", { symbol: SYMBOL });
+  const priceResult = await twelveGet("/price", { symbol: SYMBOL });
+  const priceResp = priceResult.data;
   if (priceResp) {
     const price = parseFloatSafe(priceResp.price);
     if (price) {
       return {
-        provider_ts: new Date().toISOString(),
-        symbol: SYMBOL,
-        price,
-        bid: price,
-        ask: price,
-        source: "TD_DELAYED",
-        is_delayed: true,
-        meta: { endpoint: "price" },
+        tick: {
+          provider_ts: new Date().toISOString(),
+          symbol: SYMBOL,
+          price,
+          bid: price,
+          ask: price,
+          source: "TD_DELAYED",
+          is_delayed: true,
+          meta: { endpoint: "price" },
+        },
+        failure: null,
       };
     }
   }
+  if (priceResult.error?.kind === "RATE_LIMITED") {
+    return { tick: null, failure: priceResult.error };
+  }
 
-  const series = await twelveGet("/time_series", {
+  const seriesResult = await twelveGet("/time_series", {
     symbol: SYMBOL,
     interval: "1min",
     outputsize: "1",
     order: "DESC",
     timezone: "UTC",
   });
+  const series = seriesResult.data;
   const rawValues = series?.["values"];
   const values = Array.isArray(rawValues) ? (rawValues as Array<Record<string, unknown>>) : [];
   if (values.length > 0) {
@@ -216,19 +277,32 @@ async function fetchTick(): Promise<TickPayload | null> {
     const close = parseFloatSafe(row.close);
     if (close) {
       return {
-        provider_ts: parseProviderTs(row.datetime),
-        symbol: SYMBOL,
-        price: close,
-        bid: close,
-        ask: close,
-        source: "TD_DELAYED",
-        is_delayed: true,
-        meta: { endpoint: "time_series_1m" },
+        tick: {
+          provider_ts: parseProviderTs(row.datetime),
+          symbol: SYMBOL,
+          price: close,
+          bid: close,
+          ask: close,
+          source: "TD_DELAYED",
+          is_delayed: true,
+          meta: { endpoint: "time_series_1m" },
+        },
+        failure: null,
       };
     }
   }
+  if (seriesResult.error) {
+    return { tick: null, failure: seriesResult.error };
+  }
 
-  return null;
+  return {
+    tick: null,
+    failure: {
+      kind: "UPSTREAM_ERROR",
+      endpoint: "/time_series",
+      message: "No tick payload returned from quote, price, or time_series",
+    },
+  };
 }
 
 Deno.serve(async (req) => {
@@ -269,9 +343,32 @@ Deno.serve(async (req) => {
     });
   }
 
-  const tick = await fetchTick();
+  const fetchResult = await fetchTick();
+  const tick = fetchResult.tick;
   if (!tick) {
-    return jsonResponse({ error: "No market tick fetched" }, 502);
+    const failure = fetchResult.failure;
+    if (failure?.kind === "RATE_LIMITED") {
+      return jsonResponse({
+        ok: false,
+        skipped: true,
+        reason: "RATE_LIMITED",
+        upstream: {
+          endpoint: failure.endpoint,
+          code: failure.code ?? 429,
+          message: failure.message ?? "TwelveData rate limit reached",
+        },
+      }, 429);
+    }
+    return jsonResponse({
+      error: "No market tick fetched",
+      reason: "UPSTREAM_DATA_UNAVAILABLE",
+      upstream: failure ? {
+        endpoint: failure.endpoint,
+        code: failure.code ?? null,
+        status_code: failure.statusCode ?? null,
+        message: failure.message ?? null,
+      } : null,
+    }, 502);
   }
 
   const supabase = createClient(PROJECT_URL, SERVICE_ROLE_KEY);

@@ -9,6 +9,7 @@ Decision engine with:
 - Rejected-candidate logging for explainability
 """
 
+import base64
 import json
 import math
 import os
@@ -28,7 +29,10 @@ load_dotenv()
 
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+SUPABASE_KEY_FALLBACK = os.getenv("SUPABASE_KEY")
+SUPABASE_KEY = SUPABASE_SERVICE_KEY or SUPABASE_KEY_FALLBACK
+SUPABASE_KEY_SOURCE = "SUPABASE_SERVICE_KEY" if SUPABASE_SERVICE_KEY else ("SUPABASE_KEY" if SUPABASE_KEY_FALLBACK else "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 TWELVE_BASE_URL = "https://api.twelvedata.com"
@@ -59,9 +63,21 @@ SIGNAL_EXPIRY_HOURS_BY_LANE = {
 EXECUTION_VERSION = 2
 ENGINE_STALE_ALERT_MINUTES = 10
 ENGINE_ALERT_DEDUPE_MINUTES = 30
-ENTRY_ALLOWED_SESSIONS = ("LONDON", "LONDON_NY_OVERLAP")
+SIGNAL_GENERATION_INTERVAL_MINUTES = 15
+M15_MULTI_TIMEFRAME_BARS = 3600
+SESSION_ENTRY_POLICY = {
+    "ASIA": {"allow_entries": True, "threshold_adjustment": 8},
+    "LONDON": {"allow_entries": True, "threshold_adjustment": 0},
+    "LONDON_NY_OVERLAP": {"allow_entries": True, "threshold_adjustment": 0},
+    "NEW_YORK": {"allow_entries": False, "threshold_adjustment": 0},
+    "OFF_HOURS": {"allow_entries": False, "threshold_adjustment": 0},
+    "MARKET_CLOSED": {"allow_entries": False, "threshold_adjustment": 0},
+}
+DEFAULT_SESSION_ENTRY_POLICY = {"allow_entries": False, "threshold_adjustment": 0}
 SIGNAL_CLOSE_FIELD_NAMES = ("monitor_updated_at", "closed_at", "exit_price", "realized_r")
 SIGNAL_CLOSE_FIELD_FALLBACK_WARNED = False
+RUNTIME_EVENT_WRITES_AVAILABLE = True
+RUNTIME_EVENT_WRITE_WARNING_EMITTED = False
 
 TELEGRAM_EVENT_LABELS = {
     "NEW_SIGNAL": "New active signal",
@@ -103,6 +119,29 @@ class LaneConfig:
     timeframe_label: str
 
 
+@dataclass
+class CandleFetchResult:
+    data: pd.DataFrame | None
+    interval: str
+    status: str = "OK"
+    code: int | None = None
+    message: str | None = None
+    endpoint: str = "time_series"
+
+    @property
+    def ok(self) -> bool:
+        return self.data is not None
+
+    def as_meta(self) -> dict[str, Any]:
+        return {
+            "interval": self.interval,
+            "status": self.status,
+            "code": self.code,
+            "message": self.message,
+            "endpoint": self.endpoint,
+        }
+
+
 LANES = {
     "intraday": LaneConfig(
         name="intraday",
@@ -141,6 +180,13 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
 def parse_json_object(value: Any) -> dict:
     if isinstance(value, dict):
         return value
@@ -164,6 +210,61 @@ def parse_dt(value: str | None) -> datetime | None:
 
 def _dump_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def _decode_supabase_key_role(secret: str | None) -> str | None:
+    if not secret or "." not in secret:
+        return None
+
+    parts = secret.split(".")
+    if len(parts) < 2:
+        return None
+
+    try:
+        payload_segment = parts[1] + ("=" * (-len(parts[1]) % 4))
+        payload = json.loads(base64.urlsafe_b64decode(payload_segment.encode("utf-8")).decode("utf-8"))
+    except Exception:
+        return None
+
+    role = payload.get("role")
+    return str(role) if role else None
+
+
+SUPABASE_KEY_ROLE = _decode_supabase_key_role(SUPABASE_KEY)
+
+
+def _runtime_event_write_warning(error: Exception) -> str:
+    error_text = str(error or "")
+    lowered = error_text.lower()
+    service_role_hint = "Use SUPABASE_SERVICE_KEY with your Supabase service-role key."
+    if SUPABASE_KEY_SOURCE == "SUPABASE_KEY":
+        service_role_hint = (
+            "Local .env is using SUPABASE_KEY. Switch it to SUPABASE_SERVICE_KEY with your "
+            "Supabase service-role key."
+        )
+    if "42501" in lowered or "row-level security" in lowered or "permission denied" in lowered:
+        role_hint = f" Decoded key role: {SUPABASE_KEY_ROLE}." if SUPABASE_KEY_ROLE else ""
+        return (
+            "signal_decision_runs write failed due to insufficient Supabase privileges; "
+            "runtime health alerts are disabled for this run. "
+            f"{service_role_hint}{role_hint}"
+        )
+    return (
+        "signal_decision_runs write failed; runtime health alerts are disabled until "
+        f"runtime logging succeeds again. Error: {error_text}"
+    )
+
+
+def _mark_runtime_event_write_failure(error: Exception) -> None:
+    global RUNTIME_EVENT_WRITES_AVAILABLE
+    global RUNTIME_EVENT_WRITE_WARNING_EMITTED
+
+    RUNTIME_EVENT_WRITES_AVAILABLE = False
+    if RUNTIME_EVENT_WRITE_WARNING_EMITTED:
+        return
+
+    print(f"  WARNING: {_runtime_event_write_warning(error)}")
+    RUNTIME_EVENT_WRITE_WARNING_EMITTED = True
 
 
 def _tick_time_iso(row: dict) -> str:
@@ -193,12 +294,18 @@ def _candidate_ui_payload(candidate: dict | None, decision_state: str, reason: s
     score_normalized = max(0.0, min(100.0, score_raw))
     threshold_raw = safe_float(candidate.get("threshold"), 0.0)
     threshold_normalized = max(0.0, min(100.0, threshold_raw))
+    base_threshold = safe_float(candidate.get("base_threshold"), threshold_raw)
+    session_threshold_adjustment = safe_float(candidate.get("session_threshold_adjustment"), 0.0)
+    final_threshold = safe_float(candidate.get("final_threshold"), threshold_raw)
     confidence = int(round(score_normalized))
     conditions = {
         **candidate.get("conditions", {}),
         "hard_gates": candidate.get("hard_gates", {}),
         "score_total": score_normalized,
         "score_total_raw": score_raw,
+        "base_threshold": round(base_threshold, 2),
+        "session_threshold_adjustment": round(session_threshold_adjustment, 2),
+        "final_threshold": round(final_threshold, 2),
         "threshold_raw": threshold_raw,
         "threshold_normalized": round(threshold_normalized, 2),
         "score_breakdown": candidate.get("score_breakdown", {}),
@@ -206,6 +313,7 @@ def _candidate_ui_payload(candidate: dict | None, decision_state: str, reason: s
         "session_context": candidate.get("session_context"),
         "news_context": candidate.get("news_context", {}),
         "blocked_reason": candidate.get("blocked_reason"),
+        "session_entry_allowed": bool(candidate.get("session_entry_allowed", candidate.get("hard_gates", {}).get("session_allowed"))),
         "tp1_be_applied": False,
         "tp1_hit_at": None,
         "tp1_fraction": DEMO_TP1_CLOSE_FRACTION,
@@ -241,6 +349,9 @@ def _candidate_ui_payload(candidate: dict | None, decision_state: str, reason: s
         "score_total": round(score_normalized, 2),
         "score_breakdown": candidate.get("score_breakdown", {}),
         "blocked_reason": None if decision_state == "ACTIVE" else (candidate.get("blocked_reason") or reason),
+        "base_threshold": round(base_threshold, 2),
+        "session_threshold_adjustment": round(session_threshold_adjustment, 2),
+        "final_threshold": round(final_threshold, 2),
         "rr_value": candidate.get("rr_value"),
         "risk_percent_used": candidate.get("risk_percent_used"),
         "position_size": candidate.get("position_size"),
@@ -318,8 +429,20 @@ def normalize_lane_name(value: Any) -> str:
     return "swing" if str(value or "intraday").strip().lower() == "swing" else "intraday"
 
 
+def get_session_entry_policy(session_name: str | None) -> dict[str, Any]:
+    return SESSION_ENTRY_POLICY.get(str(session_name or "").upper(), DEFAULT_SESSION_ENTRY_POLICY)
+
+
 def session_allows_new_entries(session_name: str | None) -> bool:
-    return str(session_name or "").upper() in ENTRY_ALLOWED_SESSIONS
+    return bool(get_session_entry_policy(session_name).get("allow_entries"))
+
+
+def get_session_threshold_adjustment(session_name: str | None) -> int:
+    return int(get_session_entry_policy(session_name).get("threshold_adjustment") or 0)
+
+
+def get_required_score_threshold(base_threshold: float, session_name: str | None) -> float:
+    return float(base_threshold + get_session_threshold_adjustment(session_name))
 
 
 def required_entry_confirmation(
@@ -368,7 +491,7 @@ def check_active_signals_by_lane() -> dict[str, dict]:
     return active_by_lane
 
 
-def insert_decision_run(market_price: float, lane_payloads: dict[str, dict], meta: dict | None = None) -> None:
+def insert_decision_run(market_price: float, lane_payloads: dict[str, dict], meta: dict | None = None) -> bool:
     row = {
         "market_price": round(safe_float(market_price, 0), 5),
         "intraday_decision": lane_payloads.get("intraday", {}),
@@ -377,11 +500,16 @@ def insert_decision_run(market_price: float, lane_payloads: dict[str, dict], met
     }
     try:
         supabase.table("signal_decision_runs").insert(row).execute()
+        global RUNTIME_EVENT_WRITES_AVAILABLE
+        RUNTIME_EVENT_WRITES_AVAILABLE = True
+        return True
     except Exception as e:
         print(f"  WARNING: signal decision run insert failed: {e}")
+        _mark_runtime_event_write_failure(e)
+        return False
 
 
-def record_engine_runtime_event(stage: str, market_price: float = 0.0, meta: dict | None = None) -> None:
+def record_engine_runtime_event(stage: str, market_price: float = 0.0, meta: dict | None = None) -> bool:
     row = {
         "market_price": round(safe_float(market_price, 0), 5),
         "intraday_decision": {},
@@ -390,8 +518,13 @@ def record_engine_runtime_event(stage: str, market_price: float = 0.0, meta: dic
     }
     try:
         supabase.table("signal_decision_runs").insert(row).execute()
+        global RUNTIME_EVENT_WRITES_AVAILABLE
+        RUNTIME_EVENT_WRITES_AVAILABLE = True
+        return True
     except Exception as e:
         print(f"  WARNING: engine runtime event insert failed: {e}")
+        _mark_runtime_event_write_failure(e)
+        return False
 
 
 def _truncate_for_log(value: Any, limit: int = 320) -> str:
@@ -516,6 +649,30 @@ def _recent_runtime_alert_exists(kind: str, within_minutes: int = ENGINE_ALERT_D
                 return True
     except Exception as e:
         print(f"  WARNING: runtime alert lookup failed: {e}")
+    return False
+
+
+def _recent_runtime_stage_exists(stages: set[str], within_minutes: int = ENGINE_ALERT_DEDUPE_MINUTES, limit: int = 30) -> bool:
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(within_minutes, 1))
+    normalized = {str(stage or "").upper() for stage in stages}
+    if not normalized:
+        return False
+    try:
+        resp = (
+            supabase.table("signal_decision_runs")
+            .select("created_at,meta")
+            .gte("created_at", cutoff.isoformat())
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        for row in resp.data or []:
+            meta = parse_json_object(row.get("meta"))
+            stage = str(meta.get("run_stage") or "").upper()
+            if stage in normalized:
+                return True
+    except Exception as e:
+        print(f"  WARNING: runtime stage lookup failed: {e}")
     return False
 
 
@@ -700,12 +857,12 @@ def record_demo_trade_event(
         return False
 
 
-def fetch_candles(symbol: str, multiplier: int, timespan: str, bars: int = 220) -> pd.DataFrame | None:
+def fetch_candles(symbol: str, multiplier: int, timespan: str, bars: int = 220) -> CandleFetchResult:
+    interval = f"{multiplier}min" if timespan == "minute" else f"{multiplier}h"
     if not TWELVE_DATA_API_KEY:
         print("  ERROR: Missing TWELVE_DATA_API_KEY")
-        return None
+        return CandleFetchResult(None, interval=interval, status="UPSTREAM_DATA_UNAVAILABLE", message="Missing TWELVE_DATA_API_KEY")
 
-    interval = f"{multiplier}min" if timespan == "minute" else f"{multiplier}h"
     try:
         resp = HTTP.get(
             f"{TWELVE_BASE_URL}/time_series",
@@ -722,12 +879,15 @@ def fetch_candles(symbol: str, multiplier: int, timespan: str, bars: int = 220) 
         resp.raise_for_status()
         payload = resp.json()
         if str(payload.get("status", "")).lower() == "error":
-            print(f"  ERROR: Twelve Data {interval}: {payload.get('message', 'unknown')}")
-            return None
+            code = _safe_int(payload.get("code"))
+            message = str(payload.get("message", "unknown"))
+            status = "RATE_LIMITED" if code == 429 else "UPSTREAM_DATA_UNAVAILABLE"
+            print(f"  ERROR: Twelve Data {interval}: {message}")
+            return CandleFetchResult(None, interval=interval, status=status, code=code, message=message)
 
         values = payload.get("values", [])
         if not values:
-            return None
+            return CandleFetchResult(None, interval=interval, status="UPSTREAM_DATA_UNAVAILABLE", message="No candle values returned")
 
         df = pd.DataFrame(values).rename(
             columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume", "datetime": "Timestamp"}
@@ -736,30 +896,37 @@ def fetch_candles(symbol: str, multiplier: int, timespan: str, bars: int = 220) 
             df["Volume"] = 0
         df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True, errors="coerce")
         df = df.dropna(subset=["Timestamp"]).set_index("Timestamp")
-        return df[["Open", "High", "Low", "Close", "Volume"]].astype(float).sort_index().tail(bars)
+        return CandleFetchResult(
+            df[["Open", "High", "Low", "Close", "Volume"]].astype(float).sort_index().tail(bars),
+            interval=interval,
+        )
     except Exception as e:
         print(f"  ERROR fetching candles ({interval}): {e}")
-        return None
+        return CandleFetchResult(None, interval=interval, status="UPSTREAM_DATA_UNAVAILABLE", message=str(e))
 
 
-def fetch_dxy_quote() -> dict | None:
-    if not TWELVE_DATA_API_KEY:
-        return None
-    try:
-        resp = HTTP.get(
-            f"{TWELVE_BASE_URL}/price",
-            params={"symbol": "DXY", "apikey": TWELVE_DATA_API_KEY},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-        if str(payload.get("status", "")).lower() == "error":
-            return None
-        if payload.get("price") is None:
-            return None
-        return {"price": safe_float(payload.get("price"), 0.0)}
-    except Exception:
-        return None
+def should_run_signal_generation(now: datetime | None = None) -> bool:
+    current = now or datetime.now(timezone.utc)
+    return (current.minute % SIGNAL_GENERATION_INTERVAL_MINUTES) == 0
+
+
+def resample_candles(source_df: pd.DataFrame, rule: str, bars: int = 220) -> pd.DataFrame:
+    if source_df.empty:
+        return source_df.copy()
+
+    frame = source_df.sort_index()[["Open", "High", "Low", "Close", "Volume"]].copy()
+    resampled = (
+        frame.resample(rule)
+        .agg({
+            "Open": "first",
+            "High": "max",
+            "Low": "min",
+            "Close": "last",
+            "Volume": "sum",
+        })
+        .dropna(subset=["Open", "High", "Low", "Close"])
+    )
+    return resampled.tail(bars)
 
 
 def fetch_latest_spread() -> dict:
@@ -985,6 +1152,10 @@ def update_signal_execution_state(
 def check_engine_runtime_health(latest_tick: dict, market_clock: dict) -> None:
     if not market_clock.get("market_open"):
         return
+    if not RUNTIME_EVENT_WRITES_AVAILABLE:
+        return
+    if _recent_runtime_stage_exists({"RATE_LIMITED", "UPSTREAM_DATA_UNAVAILABLE"}):
+        return
 
     last_completed = _latest_completed_decision_run()
     if not last_completed:
@@ -1017,6 +1188,8 @@ def check_engine_runtime_health(latest_tick: dict, market_clock: dict) -> None:
 
 def check_active_signal_monitoring_health(active_rows: list[dict], stale_minutes: int = 15) -> None:
     if not active_rows:
+        return
+    if not RUNTIME_EVENT_WRITES_AVAILABLE:
         return
 
     now = datetime.now(timezone.utc)
@@ -2254,8 +2427,10 @@ def build_candidate(
     elif not required_setup_ok:
         blocked = required_setup_reason
 
-    threshold = lane.threshold + threshold_adjust + (3 if news["medium_penalty"] else 0)
-    if blocked is None and score_total < threshold:
+    base_threshold = lane.threshold + threshold_adjust + (3 if news["medium_penalty"] else 0)
+    session_threshold_adjustment = get_session_threshold_adjustment(session_name)
+    final_threshold = get_required_score_threshold(base_threshold, session_name)
+    if blocked is None and score_total < final_threshold:
         blocked = "SCORE_BELOW_THRESHOLD"
 
     risk_amount = ACCOUNT_EQUITY_DEFAULT * (lane.risk_percent / 100.0)
@@ -2283,9 +2458,13 @@ def build_candidate(
         "score_total": score_total,
         "score_breakdown": breakdown,
         "blocked_reason": blocked,
-        "threshold": threshold,
+        "threshold": final_threshold,
+        "base_threshold": base_threshold,
+        "session_threshold_adjustment": session_threshold_adjustment,
+        "final_threshold": final_threshold,
         "session_context": session["name"],
         "news_context": {"high_blackout": news["high_blackout"], "medium_penalty": news["medium_penalty"]},
+        "session_entry_allowed": session_allowed,
         "hard_gates": {
             "spread_ok": spread_ok,
             "min_rr_ok": rr_ok,
@@ -2707,7 +2886,6 @@ def generate_new_candidates(
     df_h1: pd.DataFrame,
     df_h4: pd.DataFrame,
     spread_info: dict,
-    dxy: dict | None,
     session: dict,
     news: dict,
     asian_range: dict | None,
@@ -2873,7 +3051,6 @@ def generate_new_candidates(
             "spread": spread_info,
             "degrade_mode": degrade_mode_active,
             "risk_state": state,
-            "dxy_price": safe_float((dxy or {}).get("price"), 0),
         },
     )
     return lane_decisions, degrade_mode_active
@@ -2951,23 +3128,85 @@ def run_signal_engine() -> None:
     else:
         print("  WARNING: no valid market_ticks price for active-trade monitoring this run.")
 
-    df_m15 = fetch_candles("XAU/USD", 15, "minute")
-    df_h1 = fetch_candles("XAU/USD", 1, "hour")
-    df_h4 = fetch_candles("XAU/USD", 4, "hour")
-    if df_m15 is None or df_h1 is None or df_h4 is None:
-        print("  ERROR: missing candle set")
+    if not should_run_signal_generation():
+        print(
+            f"  Skipping signal generation until the next {SIGNAL_GENERATION_INTERVAL_MINUTES}-minute candle boundary."
+        )
         record_engine_runtime_event(
-            "ABORTED",
-            market_price=safe_float(latest_tick.get("price"), 0),
-            meta={"reason": "MISSING_CANDLES", "latest_tick_time": latest_tick.get("provider_ts") or latest_tick.get("created_at")},
+            "COMPLETED",
+            market_price=reconcile_price,
+            meta={
+                "reason": "WAITING_FOR_TRIGGER_BAR",
+                "signal_generation_skipped": True,
+                "signal_generation_interval_minutes": SIGNAL_GENERATION_INTERVAL_MINUTES,
+                "reconciled_demo_trades": reconcile_summary.get("recovered_count", 0),
+                "reconcile_failures": reconcile_summary.get("failed_count", 0),
+            },
         )
         return
+
+    m15_result = fetch_candles("XAU/USD", 15, "minute", bars=M15_MULTI_TIMEFRAME_BARS)
+    candle_failures = [result for result in [m15_result] if not result.ok]
+    if candle_failures:
+        latest_tick_time = latest_tick.get("provider_ts") or latest_tick.get("created_at")
+        failure_meta = [result.as_meta() for result in candle_failures]
+        rate_limit_failures = [result for result in candle_failures if result.status == "RATE_LIMITED"]
+        if rate_limit_failures:
+            print("  WARNING: candle fetch skipped due to Twelve Data rate limiting.")
+            record_engine_runtime_event(
+                "RATE_LIMITED",
+                market_price=safe_float(latest_tick.get("price"), 0),
+                meta={
+                    "reason": "TWELVE_DATA_RATE_LIMITED",
+                    "latest_tick_time": latest_tick_time,
+                    "candle_failures": failure_meta,
+                },
+            )
+            summary = ", ".join(
+                f"{result.interval}:{result.code or 'n/a'}"
+                for result in rate_limit_failures
+            )
+            send_operational_alert(
+                "TWELVE_RATE_LIMITED",
+                (
+                    "XAUradar runtime alert | TWELVE_RATE_LIMITED\n"
+                    f"Candle fetch quota exhausted for: {summary}\n"
+                    f"Latest tick time: {latest_tick_time or 'unknown'}"
+                ),
+                meta={"candle_failures": failure_meta},
+            )
+            return
+
+        print("  ERROR: missing candle set from upstream provider")
+        record_engine_runtime_event(
+            "UPSTREAM_DATA_UNAVAILABLE",
+            market_price=safe_float(latest_tick.get("price"), 0),
+            meta={
+                "reason": "MISSING_CANDLES",
+                "latest_tick_time": latest_tick_time,
+                "candle_failures": failure_meta,
+            },
+        )
+        return
+
+    df_m15 = m15_result.data.tail(220).copy()
+    df_h1 = resample_candles(m15_result.data, "1h", bars=220)
+    df_h4 = resample_candles(m15_result.data, "4h", bars=220)
     if len(df_m15) < 120 or len(df_h1) < 120 or len(df_h4) < 120:
         print("  ERROR: insufficient bars")
         record_engine_runtime_event(
             "ABORTED",
             market_price=safe_float(latest_tick.get("price"), 0),
-            meta={"reason": "INSUFFICIENT_BARS", "latest_tick_time": latest_tick.get("provider_ts") or latest_tick.get("created_at")},
+            meta={
+                "reason": "INSUFFICIENT_BARS",
+                "latest_tick_time": latest_tick.get("provider_ts") or latest_tick.get("created_at"),
+                "bar_counts": {
+                    "m15": len(df_m15),
+                    "h1": len(df_h1),
+                    "h4": len(df_h4),
+                },
+                "m15_source_bars": len(m15_result.data),
+            },
         )
         return
 
@@ -2978,7 +3217,6 @@ def run_signal_engine() -> None:
     df_h4 = calculate_confirm_indicators(df_h4)
 
     current_price = safe_float(df_m15.iloc[-1]["Close"], 0)
-    dxy = fetch_dxy_quote()
     session = get_session_context()
     news = get_news_context()
     asian_range = get_asian_range(df_m15)
@@ -2996,7 +3234,6 @@ def run_signal_engine() -> None:
         df_h1=df_h1,
         df_h4=df_h4,
         spread_info=spread_info,
-        dxy=dxy,
         session=session,
         news=news,
         asian_range=asian_range,
@@ -3016,8 +3253,6 @@ def run_signal_engine() -> None:
             "keltner_upper": safe_float(df_m15.iloc[-1].get("keltner_upper"), 0),
             "keltner_lower": safe_float(df_m15.iloc[-1].get("keltner_lower"), 0),
             "atr": safe_float(df_m15.iloc[-1].get("atr"), 0),
-            "dxy_price": safe_float((dxy or {}).get("price"), 0),
-            "dxy_direction": "UP" if safe_float((dxy or {}).get("price"), 0) > 104 else ("DOWN" if safe_float((dxy or {}).get("price"), 0) > 0 else "FLAT"),
         }
         supabase.table("indicator_snapshots").insert(s).execute()
     except Exception as e:
